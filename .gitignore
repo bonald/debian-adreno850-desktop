@@ -8,4 +8,6 @@ android-app/build/
 *.tar.zst
 *.img
 *.log
+__pycache__/
+*.pyc
 .DS_Store
