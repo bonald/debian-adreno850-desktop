@@ -79,6 +79,34 @@ get_loop_dev() {
     mount | awk -v m="$MNT" '$3 == m {print $1; exit}' | sed 's|/dev/block/||;s|/dev/||'
 }
 
+# Lock a sysfs control node to a desired value by writing to the real kernel node first,
+# then bind-mounting a writable tmpfs sink (preserving SELinux context) so vendor daemons
+# (iawareperf / perf2-hal / dubaid) succeed silently without re-clamping clocks or spinning.
+# Hardware CPUCP/LMh (scmi_limit_notify_cb) and TSENS (105-125C) stay 100% active underneath.
+guard_sysfs_node() {
+    local target="$1" val="$2" name="$3"
+    local sink="/dev/.debian_gpu_guard/$name"
+    [ -e "$target" ] || return 0
+    mountpoint -q "$target" && umount "$target" 2>/dev/null || true
+    chmod 644 "$target" 2>/dev/null || true
+    (echo "$val" > "$target") 2>/dev/null || true
+    mkdir -p /dev/.debian_gpu_guard
+    printf "%s\n" "$val" > "$sink"
+    chmod 666 "$sink"
+    chcon --reference="$target" "$sink" 2>/dev/null || true
+    mount --bind "$sink" "$target" 2>/dev/null || true
+}
+
+unguard_sysfs_node() {
+    local target="$1" val="${2:-}"
+    [ -e "$target" ] || return 0
+    mountpoint -q "$target" && umount "$target" 2>/dev/null || true
+    if [ -n "$val" ]; then
+        chmod 644 "$target" 2>/dev/null || true
+        (echo "$val" > "$target") 2>/dev/null || true
+    fi
+}
+
 sync_boot_script() {
     if [ "${PERF_BOOT_PERSIST:-1}" = "1" ]; then
         mkdir -p /data/adb/service.d
@@ -221,8 +249,9 @@ apply_perf_tweaks() {
 
     # 2. Adreno 850 GPU thermal unlock (0 = 1450 MHz max)
     if [ "$PERF_GPU_UNLOCK" = "1" ]; then
-        chmod 644 /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel 2>/dev/null || true
-        (echo 0 > /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel) 2>/dev/null || true
+        guard_sysfs_node /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel "0" gpu_thermal_pwrlevel
+    else
+        unguard_sysfs_node /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel "0"
     fi
 
     # 3. Adreno 850 KGSL wake level & idle timer (+24% FPS in glmark2)
@@ -238,50 +267,47 @@ apply_perf_tweaks() {
     fi
 
     # 4. CPU max frequency, honor_fas burst cap & core_ctl 8-core unlock
+    # Uses bind-mount sysfs guards so iawareperf / perf2-hal stay running (smooth UI)
+    # without silently re-clamping msm_performance/cpu_max_freq or parking Prime cores.
     if [ "$PERF_CPU_UNLOCK" = "1" ]; then
-        # Disable honor_fas 2.18/2.42 GHz frame-aware burst clamp (keeps iawareperf running!)
-        (echo 0 > /sys/kernel/fas/mgr/fas_enable) 2>/dev/null || true
-        # Unlock core_ctl so Prime cores (cpu6-7) & Big cores (cpu3-5) stay active
-        (echo 3 > /sys/devices/system/cpu/cpu0/core_ctl/max_cpus) 2>/dev/null || true
-        (echo 3 > /sys/devices/system/cpu/cpu0/core_ctl/min_cpus) 2>/dev/null || true
-        (echo 3 > /sys/devices/system/cpu/cpu3/core_ctl/max_cpus) 2>/dev/null || true
-        (echo 3 > /sys/devices/system/cpu/cpu3/core_ctl/min_cpus) 2>/dev/null || true
-        (echo 0 > /sys/devices/system/cpu/cpu3/core_ctl/enable) 2>/dev/null || true
-        (echo 2 > /sys/devices/system/cpu/cpu6/core_ctl/max_cpus) 2>/dev/null || true
-        (echo 2 > /sys/devices/system/cpu/cpu6/core_ctl/min_cpus) 2>/dev/null || true
-        (echo 0 > /sys/devices/system/cpu/cpu6/core_ctl/enable) 2>/dev/null || true
-        chmod 644 /sys/kernel/msm_performance/parameters/cpu_max_freq 2>/dev/null || true
-        (echo "0:3744000 1:3744000 2:3744000 3:4032000 4:4032000 5:4032000 6:5011200 7:5011200" \
-            > /sys/kernel/msm_performance/parameters/cpu_max_freq) 2>/dev/null || true
+        guard_sysfs_node /sys/kernel/fas/mgr/fas_enable "0" fas_enable
+        guard_sysfs_node /sys/devices/system/cpu/cpu0/core_ctl/max_cpus "3" c0_max
+        guard_sysfs_node /sys/devices/system/cpu/cpu0/core_ctl/min_cpus "3" c0_min
+        guard_sysfs_node /sys/devices/system/cpu/cpu3/core_ctl/max_cpus "3" c3_max
+        guard_sysfs_node /sys/devices/system/cpu/cpu3/core_ctl/min_cpus "3" c3_min
+        guard_sysfs_node /sys/devices/system/cpu/cpu3/core_ctl/enable "0" c3_en
+        guard_sysfs_node /sys/devices/system/cpu/cpu6/core_ctl/max_cpus "2" c6_max
+        guard_sysfs_node /sys/devices/system/cpu/cpu6/core_ctl/min_cpus "2" c6_min
+        guard_sysfs_node /sys/devices/system/cpu/cpu6/core_ctl/enable "0" c6_en
+        guard_sysfs_node /sys/kernel/msm_performance/parameters/cpu_max_freq \
+            "0:3744000 1:3744000 2:3744000 3:4032000 4:4032000 5:4032000 6:5011200 7:5011200" \
+            cpu_max_freq
         for p in 0 3 6; do
             chmod 644 "/sys/devices/system/cpu/cpufreq/policy$p/scaling_max_freq" 2>/dev/null || true
             hw=$(cat "/sys/devices/system/cpu/cpufreq/policy$p/cpuinfo_max_freq" 2>/dev/null || true)
             [ -n "$hw" ] && (echo "$hw" > "/sys/devices/system/cpu/cpufreq/policy$p/scaling_max_freq") 2>/dev/null || true
         done
     else
-        (echo 1 > /sys/kernel/fas/mgr/fas_enable) 2>/dev/null || true
-        (echo 1 > /sys/devices/system/cpu/cpu3/core_ctl/enable) 2>/dev/null || true
-        (echo 0 > /sys/devices/system/cpu/cpu3/core_ctl/min_cpus) 2>/dev/null || true
-        (echo 1 > /sys/devices/system/cpu/cpu6/core_ctl/enable) 2>/dev/null || true
-        (echo 0 > /sys/devices/system/cpu/cpu6/core_ctl/min_cpus) 2>/dev/null || true
+        unguard_sysfs_node /sys/kernel/msm_performance/parameters/cpu_max_freq \
+            "0:3744000 1:3744000 2:3744000 3:4032000 4:4032000 5:4032000 6:5011200 7:5011200"
+        unguard_sysfs_node /sys/kernel/fas/mgr/fas_enable "1"
+        unguard_sysfs_node /sys/devices/system/cpu/cpu0/core_ctl/max_cpus "3"
+        unguard_sysfs_node /sys/devices/system/cpu/cpu0/core_ctl/min_cpus "3"
+        unguard_sysfs_node /sys/devices/system/cpu/cpu3/core_ctl/max_cpus "3"
+        unguard_sysfs_node /sys/devices/system/cpu/cpu3/core_ctl/min_cpus "0"
+        unguard_sysfs_node /sys/devices/system/cpu/cpu3/core_ctl/enable "1"
+        unguard_sysfs_node /sys/devices/system/cpu/cpu6/core_ctl/max_cpus "2"
+        unguard_sysfs_node /sys/devices/system/cpu/cpu6/core_ctl/min_cpus "0"
+        unguard_sysfs_node /sys/devices/system/cpu/cpu6/core_ctl/enable "1"
     fi
 
-    # 4b. Docked Thermal Mode: pause Honor 40C skin-temp daemon (dubaid) & hn_thermal cooling_switch
+    # 4b. Docked Thermal Mode: pause Honor 40C skin-temp daemon (dubaid) & guard hn_thermal cooling_switch
     # Keeps vendor.honor.hardware.iawareperf running (smooth UI) and HW CPUCP/LMh + TSENS (105-125C) active!
     if [ "$PERF_THERMAL_DOCKED" = "1" ]; then
-        (echo 0 > /sys/class/hn_thermal/cooling/cooling_switch) 2>/dev/null || true
+        guard_sysfs_node /sys/class/hn_thermal/cooling/cooling_switch "0" cooling_switch
         stop dubaid 2>/dev/null || true
-        # Re-clear any cap dubaid wrote right before stopping
-        if [ "$PERF_CPU_UNLOCK" = "1" ]; then
-            (echo "0:3744000 1:3744000 2:3744000 3:4032000 4:4032000 5:4032000 6:5011200 7:5011200" \
-                > /sys/kernel/msm_performance/parameters/cpu_max_freq) 2>/dev/null || true
-            for p in 0 3 6; do
-                hw=$(cat "/sys/devices/system/cpu/cpufreq/policy$p/cpuinfo_max_freq" 2>/dev/null || true)
-                [ -n "$hw" ] && (echo "$hw" > "/sys/devices/system/cpu/cpufreq/policy$p/scaling_max_freq") 2>/dev/null || true
-            done
-        fi
     else
-        (echo 1 > /sys/class/hn_thermal/cooling/cooling_switch) 2>/dev/null || true
+        unguard_sysfs_node /sys/class/hn_thermal/cooling/cooling_switch "1"
         start dubaid 2>/dev/null || true
     fi
 
