@@ -8,8 +8,11 @@
 #   su -c "/data/adb/debian-gpu.sh start"            - Apply perf, mount, X11, audio, desktop & VNC
 #   su -c "/data/adb/debian-gpu.sh stop"             - Stop desktop, VNC & noVNC
 #   su -c "/data/adb/debian-gpu.sh macos-start"      - Switch to macOS 27.2 VM (Gunyah + xnu_fb_view on :0)
-#   su -c "/data/adb/debian-gpu.sh macos-stop"       - Stop macOS 27.2 VM & xnu_fb_view
+#   su -c "/data/adb/debian-gpu.sh macos-stop"       - Stop macOS 27.2 VM, viewer & host bridges
+#   su -c "/data/adb/debian-gpu.sh macos-services"   - Start/refresh macOS Audio, WebDAV/Clipboard & Tailscale SSH/VNC
 #   su -c "/data/adb/debian-gpu.sh macos-log"        - Show recent macOS VM & XNU dmesg logs
+#   su -c "/data/adb/debian-gpu.sh profile docked|battery" - Switch 1-tap performance profile
+#   su -c "/data/adb/debian-gpu.sh set-macos-opt K V" - Persist MACOS_RES or MACOS_RAM_MB preset
 #   su -c "/data/adb/debian-gpu.sh umount"           - Stop services/VM and unmount chroot image
 #   su -c "/data/adb/debian-gpu.sh shell"            - Interactive bash shell as droid
 #   su -c "/data/adb/debian-gpu.sh status"           - Show running services & remote URLs
@@ -57,6 +60,8 @@ PERF_XFCE_OPT=1
 PERF_CHROMIUM_VULKAN=1
 PERF_PULSEAUDIO=1
 PERF_BOOT_PERSIST=1
+MACOS_RES=1920x1080
+MACOS_RAM_MB=4400
 EOF
     chmod 644 "$CONF"
 }
@@ -78,6 +83,8 @@ load_conf() {
     PERF_CHROMIUM_VULKAN=1
     PERF_PULSEAUDIO=1
     PERF_BOOT_PERSIST=1
+    MACOS_RES=1920x1080
+    MACOS_RAM_MB=4400
     # shellcheck disable=SC1090
     . "$CONF" 2>/dev/null || true
 }
@@ -170,7 +177,11 @@ do_mount() {
     mountpoint -q "$MNT/dev/pts" || mount --bind /dev/pts "$MNT/dev/pts"
     mountpoint -q "$MNT/dev/shm" || mount -t tmpfs -o rw,nosuid,nodev,mode=1777 tmpfs "$MNT/dev/shm"
     mountpoint -q "$MNT/tmp/.X11-unix" || mount --bind "$X11_DIR" "$MNT/tmp/.X11-unix"
-    mountpoint -q "$MNT/mnt/android" || mount --bind /storage/emulated/0 "$MNT/mnt/android"
+    # Bind /data/media/0 (direct storage backing) instead of FUSE /storage/emulated/0 so it never hits ENOTCONN
+    if ! ls "$MNT/mnt/android" >/dev/null 2>&1; then
+        umount -l "$MNT/mnt/android" 2>/dev/null || true
+    fi
+    mountpoint -q "$MNT/mnt/android" || mount --bind /data/media/0 "$MNT/mnt/android" 2>/dev/null || mount --bind /storage/emulated/0 "$MNT/mnt/android"
     printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > "$MNT/etc/resolv.conf"
     # Apply loop read-ahead right after mount if VM/IO tuning enabled
     load_conf
@@ -425,21 +436,28 @@ start_pulseaudio() {
     [ "$PERF_PULSEAUDIO" = "1" ] || return 0
     su "$TUID" -g 3003 -c "
         export PREFIX=$TPREFIX HOME=$THOME TMPDIR=$TPREFIX/tmp PATH=$TPREFIX/bin:/system/bin PULSE_SERVER=127.0.0.1
-        if ! pgrep -x pulseaudio >/dev/null 2>&1; then
-            pulseaudio --start --load='module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1' --exit-idle-time=-1 >/dev/null 2>&1 || true
-            sleep 0.5
+        if pgrep -x pulseaudio >/dev/null 2>&1; then
+            if ! timeout 3 pactl info >/dev/null 2>&1; then
+                pkill -9 -x pulseaudio 2>/dev/null || true
+                sleep 0.3
+            fi
         fi
-        if ! pactl list short sinks 2>/dev/null | grep -qiE 'AAudio_sink|OpenSL'; then
-            pactl load-module module-aaudio-sink >/dev/null 2>&1 || pactl load-module module-sles-sink >/dev/null 2>&1 || true
+        if ! pgrep -x pulseaudio >/dev/null 2>&1; then
+            rm -rf \"\$TMPDIR\"/pulse-* \"\$HOME\"/.config/pulse/*.pid 2>/dev/null || true
+            env -u PULSE_SERVER pulseaudio --start --load='module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1' --exit-idle-time=-1 >/dev/null 2>&1 || true
+            sleep 0.6
+        fi
+        if ! timeout 3 pactl list short sinks 2>/dev/null | grep -qiE 'AAudio_sink|OpenSL'; then
+            timeout 3 pactl load-module module-aaudio-sink >/dev/null 2>&1 || timeout 3 pactl load-module module-sles-sink >/dev/null 2>&1 || true
             sleep 0.2
         fi
-        SINK=\$(pactl list short sinks 2>/dev/null | awk '/AAudio_sink|OpenSL/{print \$2; exit}')
+        SINK=\$(timeout 3 pactl list short sinks 2>/dev/null | awk '/AAudio_sink|OpenSL/{print \$2; exit}')
         if [ -n \"\$SINK\" ]; then
-            pactl set-default-sink \"\$SINK\" >/dev/null 2>&1 || true
-            pactl set-sink-mute \"\$SINK\" 0 >/dev/null 2>&1 || true
-            pactl set-sink-volume \"\$SINK\" 100% >/dev/null 2>&1 || true
-            for idx in \$(pactl list short sink-inputs 2>/dev/null | awk '{print \$1}'); do
-                pactl move-sink-input \"\$idx\" \"\$SINK\" >/dev/null 2>&1 || true
+            timeout 3 pactl set-default-sink \"\$SINK\" >/dev/null 2>&1 || true
+            timeout 3 pactl set-sink-mute \"\$SINK\" 0 >/dev/null 2>&1 || true
+            timeout 3 pactl set-sink-volume \"\$SINK\" 100% >/dev/null 2>&1 || true
+            for idx in \$(timeout 3 pactl list short sink-inputs 2>/dev/null | awk '{print \$1}'); do
+                timeout 3 pactl move-sink-input \"\$idx\" \"\$SINK\" >/dev/null 2>&1 || true
             done
         fi
     " 2>/dev/null || true
@@ -500,7 +518,8 @@ do_set_toggle() {
 }
 
 do_reset_perf() {
-    cat > "$CONF" <<'EOF'
+    load_conf
+    cat > "$CONF" <<EOF
 # Stock defaults (restored)
 PERF_HONOR_MODE=0
 PERF_GPU_UNLOCK=0
@@ -517,10 +536,104 @@ PERF_XFCE_OPT=0
 PERF_CHROMIUM_VULKAN=0
 PERF_PULSEAUDIO=1
 PERF_BOOT_PERSIST=0
+MACOS_RES=${MACOS_RES:-1920x1080}
+MACOS_RAM_MB=${MACOS_RAM_MB:-4400}
 EOF
     chmod 644 "$CONF"
     apply_perf_tweaks
     echo "Restored stock defaults."
+}
+
+do_profile() {
+    PROF="${1:-}"
+    load_conf
+    case "$PROF" in
+        docked)
+            cat > "$CONF" <<EOF
+# Profile: Docked Max (all 15 performance tweaks enabled)
+PERF_HONOR_MODE=1
+PERF_GPU_UNLOCK=1
+PERF_GPU_RAMP=1
+PERF_GPU_MAX_WAKE=1
+PERF_CPU_UNLOCK=1
+PERF_THERMAL_DOCKED=1
+PERF_WALT_BURST=1
+PERF_WALT_PRIME_BIAS=1
+PERF_VM_IO=1
+PERF_THP_OPT=1
+PERF_JEMALLOC=1
+PERF_XFCE_OPT=1
+PERF_CHROMIUM_VULKAN=1
+PERF_PULSEAUDIO=1
+PERF_BOOT_PERSIST=1
+MACOS_RES=${MACOS_RES:-1920x1080}
+MACOS_RAM_MB=${MACOS_RAM_MB:-4400}
+EOF
+            chmod 644 "$CONF"
+            apply_perf_tweaks
+            start_pulseaudio
+            echo "Applied profile: Docked Max (all 15 tweaks ON, 1450 MHz wake, docked thermal)."
+            ;;
+        battery)
+            cat > "$CONF" <<EOF
+# Profile: Battery / Portable (stock thermals/clocks + zero-power desktop optimizations)
+PERF_HONOR_MODE=0
+PERF_GPU_UNLOCK=0
+PERF_GPU_RAMP=0
+PERF_GPU_MAX_WAKE=0
+PERF_CPU_UNLOCK=0
+PERF_THERMAL_DOCKED=0
+PERF_WALT_BURST=0
+PERF_WALT_PRIME_BIAS=0
+PERF_VM_IO=1
+PERF_THP_OPT=1
+PERF_JEMALLOC=1
+PERF_XFCE_OPT=1
+PERF_CHROMIUM_VULKAN=1
+PERF_PULSEAUDIO=1
+PERF_BOOT_PERSIST=1
+MACOS_RES=${MACOS_RES:-1920x1080}
+MACOS_RAM_MB=${MACOS_RAM_MB:-4400}
+EOF
+            chmod 644 "$CONF"
+            apply_perf_tweaks
+            echo "Applied profile: Battery / Portable (dubaid + stock clocks/thermals restored; jemalloc/THP/Vulkan/Audio kept ON)."
+            ;;
+        *)
+            echo "Usage: $0 profile {docked|battery}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+do_set_macos_opt() {
+    KEY="${1:-}"
+    VAL="${2:-}"
+    case "$KEY" in
+        MACOS_RES)
+            case "$VAL" in
+                1920x1080|2384x1100|1280x720) ;;
+                *) echo "Invalid MACOS_RES: $VAL (use 1920x1080|2384x1100|1280x720)" >&2; exit 1 ;;
+            esac
+            ;;
+        MACOS_RAM_MB)
+            case "$VAL" in
+                4400|5200|6000) ;;
+                *) echo "Invalid MACOS_RAM_MB: $VAL (use 4400|5200|6000)" >&2; exit 1 ;;
+            esac
+            ;;
+        *)
+            echo "Unknown macOS option: $KEY" >&2
+            exit 1
+            ;;
+    esac
+    load_conf
+    TMP="$CONF.tmp"
+    grep -v "^${KEY}=" "$CONF" > "$TMP" 2>/dev/null || true
+    echo "${KEY}=${VAL}" >> "$TMP"
+    mv "$TMP" "$CONF"
+    chmod 644 "$CONF"
+    echo "Saved ${KEY}=${VAL} (takes effect on next Start macOS 27)."
 }
 
 start_termux_x11() {
@@ -566,7 +679,83 @@ ensure_macos_bind() {
     mountpoint -q "$MNT/var/xnu-mac" 2>/dev/null || mount --bind "$MACOS_DIR" "$MNT/var/xnu-mac"
 }
 
+kill_matching_safe() {
+    local pat="$1"
+    for p in $(pgrep -f "$pat" 2>/dev/null || true); do
+        [ "$p" = "$$" ] && continue
+        [ "$p" = "${PPID:-0}" ] && continue
+        comm=$(cat "/proc/$p/comm" 2>/dev/null || true)
+        case "$comm" in
+            sh|mksh|bash|su) continue ;;
+        esac
+        kill -9 "$p" 2>/dev/null || true
+    done
+}
+
+get_macos_guest_ip() {
+    local ip=""
+    if [ -r "$MNT/tmp/macos-ip" ]; then
+        ip=$(tr -d ' \r\n' < "$MNT/tmp/macos-ip" 2>/dev/null || true)
+    fi
+    if [ -z "$ip" ]; then
+        ip=$(ip neigh show 2>/dev/null | awk '/^192\.168\.77\./{print $1; exit}' || true)
+    fi
+    echo "$ip"
+}
+
+stop_macos_services() {
+    kill_matching_safe "TCP-LISTEN:4714"
+    kill_matching_safe "TCP-LISTEN:5901"
+    kill_matching_safe "TCP-LISTEN:2223"
+    kill_matching_safe "/usr/local/bin/macos-bridge.py"
+}
+
+start_macos_services() {
+    do_mount
+    start_pulseaudio
+
+    # Wait briefly for crosvm TAP 192.168.78.1 to exist if VM just started
+    i=0
+    while ! ip -4 addr show 2>/dev/null | grep -q "192.168.78.1" && [ "$i" -lt 10 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+
+    if ip -4 addr show 2>/dev/null | grep -q "192.168.78.1"; then
+        # Unified Audio (:4714 -> libpulse-simple -> AAudio_sink) + WebDAV (/android, /debian) + Clipboard + IP bridge (:8445)
+        kill_matching_safe "TCP-LISTEN:4714"
+        kill_matching_safe "/usr/local/bin/macos-bridge.py"
+        if [ -x "$MNT/usr/local/bin/macos-bridge.py" ]; then
+            setsid chroot "$MNT" /usr/bin/env \
+                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DISPLAY=:0 PULSE_SERVER=127.0.0.1 \
+                python3 /usr/local/bin/macos-bridge.py \
+                >"$MNT/tmp/macos-bridge.log" 2>&1 </dev/null &
+        fi
+    else
+        echo "Note: VM TAP 192.168.78.1 not up yet (start macOS 27 first)."
+    fi
+
+    # 3. Tailscale-only remote access for macOS Screen Sharing (:5901->:5900) and SSH (:2223->:22)
+    TS_IP=$(get_tailscale_ip || true)
+    MAC_IP=$(get_macos_guest_ip || true)
+    kill_matching_safe "TCP-LISTEN:5901"
+    kill_matching_safe "TCP-LISTEN:2223"
+    if [ -n "$TS_IP" ] && [ -n "$MAC_IP" ] && [ -x "$MNT/usr/bin/socat" ]; then
+        setsid chroot "$MNT" /usr/bin/socat \
+            "TCP-LISTEN:5901,bind=$TS_IP,reuseaddr,fork,nodelay" "TCP:${MAC_IP}:5900" \
+            >"$MNT/tmp/socat-mac-vnc.log" 2>&1 </dev/null &
+        setsid chroot "$MNT" /usr/bin/socat \
+            "TCP-LISTEN:2223,bind=$TS_IP,reuseaddr,fork,nodelay" "TCP:${MAC_IP}:22" \
+            >"$MNT/tmp/socat-mac-ssh.log" 2>&1 </dev/null &
+        echo "macOS Tailscale forwards: Screen Sharing ${TS_IP}:5901 -> ${MAC_IP}:5900 | SSH ${TS_IP}:2223 -> ${MAC_IP}:22"
+    else
+        echo "macOS Tailscale forwards: waiting for Tailscale (${TS_IP:-offline}) & macOS guest IP (${MAC_IP:-pending})."
+    fi
+    echo "macOS Host Bridge: Audio 192.168.78.1:4714 | WebDAV & Clipboard http://192.168.78.1:8445"
+}
+
 do_macos_stop() {
+    stop_macos_services
     pkill -TERM -x xnu_fb_view 2>/dev/null || true
     pkill -TERM -f "^sh /data/adb/run-xnulinux-vm\\.sh" 2>/dev/null || true
     pkill -TERM -x crosvm 2>/dev/null || true
@@ -591,10 +780,12 @@ do_macos_start() {
         echo "Error: $MACOS_SCRIPT not found or not executable." >&2
         exit 1
     fi
+    load_conf
     do_mount
     ensure_macos_bind
     apply_perf_tweaks
     start_termux_x11
+    start_pulseaudio
 
     # Free Termux:X11 (:0) and RAM by stopping Debian desktop & any prior VM instance
     if pgrep -x xfwm4 >/dev/null 2>&1 || pgrep -x plank >/dev/null 2>&1 || pgrep -x x0vncserver >/dev/null 2>&1; then
@@ -610,12 +801,18 @@ do_macos_start() {
     (echo 3 > /proc/sys/vm/drop_caches) 2>/dev/null || true
     sleep 0.5
 
-    # Reset XNU dmesg log so readiness reflects this boot
+    # Reset XNU dmesg log & stale guest IP so readiness reflects this boot
     : > "$MACOS_DIR/xnu-dmesg.log" 2>/dev/null || true
     : > "$MACOS_LOG" 2>/dev/null || true
+    rm -f "$MNT/tmp/macos-ip" 2>/dev/null || true
 
-    FB_W="${FB_WIDTH:-1920}"
-    FB_H="${FB_HEIGHT:-1080}"
+    # Apply persisted resolution & RAM presets (overrideable via env)
+    RES="${MACOS_RES:-1920x1080}"
+    FB_W="${FB_WIDTH:-${RES%x*}}"
+    FB_H="${FB_HEIGHT:-${RES#*x}}"
+    XNU_RAM="${XNU_RAM_MB:-${MACOS_RAM_MB:-4400}}"
+    LINUX_MB=512
+    VM_MEM="${VM_MEM_MB:-$(( ((LINUX_MB + XNU_RAM + 208 + 63) / 64) * 64 ))}"
 
     # Launch zero-copy X11 framebuffer viewer inside chroot as root (needs /proc/<crosvm>/fd access)
     if [ -x "$MNT/usr/local/bin/xnu_fb_view" ]; then
@@ -630,7 +827,8 @@ do_macos_start() {
     fi
 
     # Launch Gunyah + Adreno 850 Venus macOS 27.2 VM detached from caller stdio
-    setsid sh "$MACOS_SCRIPT" >"$MACOS_LOG" 2>&1 </dev/null &
+    setsid env FB_WIDTH="$FB_W" FB_HEIGHT="$FB_H" XNU_RAM_MB="$XNU_RAM" LINUX_MEM="${LINUX_MB}M" VM_MEM_MB="$VM_MEM" \
+        sh "$MACOS_SCRIPT" >"$MACOS_LOG" 2>&1 </dev/null &
 
     # Wait up to 8s for crosvm to come up
     i=0
@@ -645,13 +843,26 @@ do_macos_start() {
         [ -w /dev/cpuctl/top-app/cgroup.procs ] && echo "$p" > /dev/cpuctl/top-app/cgroup.procs 2>/dev/null || true
     done
 
+    # Start Audio (:4714), WebDAV/Clipboard (:8445), and wait in background for guest IP -> Tailscale forwards
+    start_macos_services >/dev/null 2>&1 || true
+    setsid sh -c '
+        for _ in $(seq 1 45); do
+            sleep 3
+            if [ -s /data/local/debian-gpu/tmp/macos-ip ]; then
+                /data/adb/debian-gpu.sh macos-services >/dev/null 2>&1 || true
+                break
+            fi
+            pgrep -x crosvm >/dev/null 2>&1 || break
+        done
+    ' >/dev/null 2>&1 </dev/null &
+
     VM_PID=$(pgrep -o -x crosvm 2>/dev/null || true)
     VIEW_PID=$(pgrep -o -x xnu_fb_view 2>/dev/null || true)
     if [ -n "$VM_PID" ]; then
-        echo "macOS 27.2 VM booting on Gunyah (Adreno 850 Venus, ${FB_W}x${FB_H})"
+        echo "macOS 27.2 VM booting on Gunyah (Adreno 850 Venus, ${FB_W}x${FB_H}, XNU ${XNU_RAM} MB / VM ${VM_MEM} MB)"
         echo "crosvm PID: $VM_PID | xnu_fb_view PID: ${VIEW_PID:-none}"
-        echo "Log: $MACOS_LOG"
-        echo "Display appears in Termux:X11 automatically once XNU completes first swap (~90s)."
+        echo "Bridge: Audio :4714 | WebDAV & Clipboard :8445 | Log: $MACOS_LOG"
+        echo "Display appears in Termux:X11 automatically once XNU completes first swap (~30s)."
     else
         echo "Warning: crosvm did not stay running — tailing $MACOS_LOG:"
         tail -n 20 "$MACOS_LOG" 2>/dev/null || true
@@ -976,10 +1187,16 @@ do_telemetry() {
         echo "MACOS_READY=0"
     fi
     pgrep -x xnu_fb_view >/dev/null 2>&1 && echo "MACOS_VIEW=1" || echo "MACOS_VIEW=0"
+    (ss -tln 2>/dev/null | grep -q '192\.168\.78\.1:4714' || pgrep -f 'TCP-LISTEN:4714' >/dev/null 2>&1) && echo "MACOS_AUDIO=1" || echo "MACOS_AUDIO=0"
+    pgrep -f '/usr/local/bin/macos-bridge.py' >/dev/null 2>&1 && echo "MACOS_BRIDGE=1" || echo "MACOS_BRIDGE=0"
+    pgrep -f 'TCP-LISTEN:5901' >/dev/null 2>&1 && echo "MACOS_REMOTE=1" || echo "MACOS_REMOTE=0"
+    echo "MACOS_IP=$(get_macos_guest_ip || true)"
+    echo "MACOS_RES=${MACOS_RES:-1920x1080}"
+    echo "MACOS_RAM_MB=${MACOS_RAM_MB:-4400}"
     (pgrep -x x0vncserver >/dev/null 2>&1 || pgrep -x X0tigervnc >/dev/null 2>&1) && echo "VNC=1" || echo "VNC=0"
     pgrep -f 'websockify.*6080' >/dev/null 2>&1 && echo "NOVNC=1" || echo "NOVNC=0"
     if pgrep -x pulseaudio >/dev/null 2>&1; then
-        SINKS=$(su "$TUID" -g 3003 -c "export PREFIX=$TPREFIX PATH=$TPREFIX/bin:/system/bin PULSE_SERVER=127.0.0.1; pactl list short sinks 2>/dev/null" 2>/dev/null || true)
+        SINKS=$(su "$TUID" -g 3003 -c "export PREFIX=$TPREFIX HOME=$THOME PATH=$TPREFIX/bin:/system/bin PULSE_SERVER=127.0.0.1; timeout 2 pactl list short sinks 2>/dev/null" 2>/dev/null || true)
         if echo "$SINKS" | grep -qiE 'AAudio_sink|OpenSL'; then
             echo "PULSE=aaudio"
         else
@@ -1041,6 +1258,15 @@ do_telemetry() {
         echo "HONOR_BLOAT_REBOOT=0"
     fi
 
+    # Active power profile detection
+    if [ "$PERF_HONOR_MODE" = "1" ] && [ "$PERF_GPU_MAX_WAKE" = "1" ] && [ "$PERF_CPU_UNLOCK" = "1" ] && [ "$PERF_THERMAL_DOCKED" = "1" ]; then
+        echo "PROFILE=docked"
+    elif [ "$PERF_HONOR_MODE" = "0" ] && [ "$PERF_GPU_MAX_WAKE" = "0" ] && [ "$PERF_CPU_UNLOCK" = "0" ] && [ "$PERF_THERMAL_DOCKED" = "0" ]; then
+        echo "PROFILE=battery"
+    else
+        echo "PROFILE=custom"
+    fi
+
     # Toggles from persistent config
     echo "PERF_HONOR_MODE=$PERF_HONOR_MODE"
     echo "PERF_GPU_UNLOCK=$PERF_GPU_UNLOCK"
@@ -1060,24 +1286,27 @@ do_telemetry() {
 }
 
 case "${1:-status}" in
-    start)       do_start ;;
-    stop)        do_stop ;;
-    macos-start) do_macos_start ;;
-    macos-stop)  do_macos_stop ;;
-    macos-log)   do_macos_log ;;
-    umount)      do_umount ;;
-    status)      do_status ;;
-    vnc)         do_vnc ;;
-    perf)        apply_perf_tweaks; echo "Perf tweaks applied." ;;
-    boot-apply)  apply_perf_tweaks ;;
-    set-toggle)  do_set_toggle "${2:-}" "${3:-}" ;;
-    reset-perf)  do_reset_perf ;;
-    audio-fix)     PERF_PULSEAUDIO=1; start_pulseaudio; echo "PulseAudio AAudio_sink ready." ;;
-    audio-stop)    stop_pulseaudio; echo "PulseAudio stopped." ;;
-    debloat)       do_debloat ;;
-    restore-bloat) do_restore_bloat ;;
-    free-ram)      do_free_ram ;;
-    telemetry)     do_telemetry ;;
+    start)          do_start ;;
+    stop)           do_stop ;;
+    macos-start)    do_macos_start ;;
+    macos-stop)     do_macos_stop ;;
+    macos-services) start_macos_services ;;
+    macos-log)      do_macos_log ;;
+    profile)        do_profile "${2:-}" ;;
+    set-macos-opt)  do_set_macos_opt "${2:-}" "${3:-}" ;;
+    umount)         do_umount ;;
+    status)         do_status ;;
+    vnc)            do_vnc ;;
+    perf)           apply_perf_tweaks; echo "Perf tweaks applied." ;;
+    boot-apply)     apply_perf_tweaks ;;
+    set-toggle)     do_set_toggle "${2:-}" "${3:-}" ;;
+    reset-perf)     do_reset_perf ;;
+    audio-fix)      PERF_PULSEAUDIO=1; start_pulseaudio; echo "PulseAudio AAudio_sink ready." ;;
+    audio-stop)     stop_pulseaudio; echo "PulseAudio stopped." ;;
+    debloat)        do_debloat ;;
+    restore-bloat)  do_restore_bloat ;;
+    free-ram)       do_free_ram ;;
+    telemetry)      do_telemetry ;;
     shell)
         do_mount
         exec chroot "$MNT" /usr/bin/env -i \
@@ -1096,7 +1325,7 @@ case "${1:-status}" in
         do_start
         ;;
     *)
-        echo "Usage: $0 {start|stop|macos-start|macos-stop|macos-log|umount|shell|status|vnc|perf|set-toggle|reset-perf|audio-fix|audio-stop|debloat|restore-bloat|free-ram|telemetry|passwd}" >&2
+        echo "Usage: $0 {start|stop|macos-start|macos-stop|macos-services|macos-log|profile|set-macos-opt|umount|shell|status|vnc|perf|set-toggle|reset-perf|audio-fix|audio-stop|debloat|restore-bloat|free-ram|telemetry|passwd}" >&2
         exit 1
         ;;
 esac

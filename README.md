@@ -253,21 +253,21 @@ Run [`scripts/setup-macos-desktop.sh`](scripts/setup-macos-desktop.sh) inside th
 
 ---
 
-## Android Manager App (`Debian GPU v2.5`)
+## Android Manager App (`Debian GPU v2.6`)
 
-Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, macOS 27.2 VM, Honor RAM debloat, audio bridge, and performance tweaks from a lightweight (~60 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
+Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, macOS 27.2 VM, Honor RAM debloat, audio/WebDAV/clipboard bridges, one-tap power profiles, and performance tweaks from a lightweight (~65 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
 
 <p align="center">
-  <img src="assets/apk-v2-screenshot.png" alt="Debian GPU v2.5 Android Manager with live CPU/GPU telemetry, macOS 27 launcher, Honor debloat, and persistent toggles" width="340" />
+  <img src="assets/apk-v2-screenshot.png" alt="Debian GPU v2.6 Android Manager with live CPU/GPU telemetry, macOS 27 presets & bridge, Honor debloat, and power profiles" width="340" />
 </p>
 
 - **Live CPU / GPU / Thermal Telemetry (auto-refreshes every 2.5s, toggleable `Live` / `Paused`):**
   - Real-time frequency meters for **CPU Little (0–2)**, **CPU Big (3–5)**, **CPU Prime (6–7)** (highlighted amber whenever capped below hardware max), and **Adreno 850 GPU** (`MHz / 1450 MHz · busy%`).
   - Live KGSL state (`thermal_lvl`, wake clock, `idle_timer`), live HAL **CPU / GPU / Skin temps**, Android thermal status, battery/charging state, Honor power mode, **RAM / ZRAM / swappiness / loop read-ahead**, plus a warning banner when Honor Launcher is capping CPU clocks. *(Tip: leaving Debian GPU open on the phone screen while docked prevents Honor's home-screen CPU cap.)*
-- **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **macOS 27.2 VM (Gunyah `Running` / `Booting...` / `Stopped`)**, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**, **Desktop Allocator (`jemalloc 5.3` / `glibc`)**, and **Honor MagicOS Bloat (`Debloated` / `N Active`)**.
-- **One-tap Desktop, macOS 27 & Audio Controls:** Start Desktop (auto-stops macOS VM & opens Termux:X11), Open Display, **Start macOS 27** (auto-stops XFCE4, launches Gunyah + Adreno 850 Venus VM & `xnu_fb_view`, opens Termux:X11), **Stop macOS**, Stop Desktop, Unmount Image, **Apply Perf Now**, and **Fix Audio Sink** (repairs `AAudio_sink` and routes active streams).
+- **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **macOS 27.2 VM (Gunyah `Running` / `Booting...` / `Stopped`)**, **macOS Bridge (`Audio + Share` / live guest IP)**, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**, **Desktop Allocator (`jemalloc 5.3` / `glibc`)**, and **Honor MagicOS Bloat (`Debloated` / `N Active`)**.
+- **One-tap Desktop, macOS 27 Presets & Audio Controls:** Start Desktop (auto-stops macOS VM & opens Termux:X11), Open Display, **Start macOS 27** (evicts cached Android apps, launches Gunyah + Adreno 850 Venus VM, `xnu_fb_view`, Audio `:4714`, WebDAV/Clipboard `:8445` & Tailscale SSH/Screen Sharing), **Stop macOS**, persisted **Display (`1080p` / `Phone 2384×1100` / `720p Fast`)** and **RAM (`4.4 GB` / `5.2 GB` / `6.0 GB`)** presets, Stop Desktop, Unmount Image, **Apply Perf Now**, and **Fix Audio Sink**.
 - **Honor RAM & Debloat (Safe / User-Space Only):** One-tap **Debloat Honor** (disables/uninstalls for user 0 all 55 Honor Auto, YOYO AI, Brain, Global Search, Cloud, Share, Theme, Push & China bloat packages — freeing **~795 MB PSS** without touching `/system`), **Free RAM Now** (`am kill-all` + `drop_caches`), and **Restore Honor Bloat** (100% reversible).
-- **15 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
+- **One-Tap Power Profiles (`Docked Max` vs `Battery / Portable`) + 15 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
   - Honor Performance Mode (`SmartModeStatus=4` + `Termux:X11` background exemption)
   - Unlock Adreno 850 Max Clock (`thermal_pwrlevel=0`, 1450 MHz)
   - GPU Fast Ramp (`951 MHz` wake + `500 ms` idle timer, +24% FPS) & GPU Max Wake (`1450 MHz` docked)
@@ -312,9 +312,12 @@ Pass `--regen-icons` (requires `python3-pil`) if you want to regenerate the `mip
 
 ```sh
 su -c "/data/adb/debian-gpu.sh start"                # Apply perf tweaks, mount chroot, start X11, PulseAudio, XFCE4+Plank & VNC
-su -c "/data/adb/debian-gpu.sh macos-start"          # Switch to macOS 27.2 VM (Gunyah + Adreno 850 Venus + xnu_fb_view on :0)
-su -c "/data/adb/debian-gpu.sh macos-stop"           # Stop macOS 27.2 VM & xnu_fb_view
+su -c "/data/adb/debian-gpu.sh macos-start"          # Switch to macOS 27.2 VM (Gunyah + Adreno 850 Venus + Audio/WebDAV/Clipboard bridge)
+su -c "/data/adb/debian-gpu.sh macos-stop"           # Stop macOS 27.2 VM, viewer & host bridges
+su -c "/data/adb/debian-gpu.sh macos-services"       # Start/refresh macOS Audio (:4714), WebDAV/Clipboard (:8445) & Tailscale SSH/VNC
 su -c "/data/adb/debian-gpu.sh macos-log"            # Tail recent macOS VM & XNU dmesg logs
+su -c "/data/adb/debian-gpu.sh profile docked|battery" # Switch 1-tap performance profile
+su -c "/data/adb/debian-gpu.sh set-macos-opt K V"    # Set MACOS_RES (1920x1080|2384x1100|1280x720) or MACOS_RAM_MB (4400|5200|6000)
 su -c "/data/adb/debian-gpu.sh status"               # Check service status and print Tailscale VNC / noVNC URLs
 su -c "/data/adb/debian-gpu.sh perf"                 # Re-apply all enabled tweaks from /data/adb/debian-gpu.conf
 su -c "/data/adb/debian-gpu.sh set-toggle KEY 0|1"   # Persist and live-apply one toggle (e.g. PERF_CHROMIUM_VULKAN 1)

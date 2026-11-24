@@ -71,15 +71,22 @@ public class MainActivity extends Activity {
     private TextView tvGpuDetail, tvThermalsLine, tvPowerLine, tvMemLine, tvLauncherWarn;
 
     // System status badges
-    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeMacos, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator, badgeDebloat;
-    private TextView tvNoVncUrl, tvVncAddr, tvDiskInfo, tvConsole, tvBusyStatus;
+    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeMacos, badgeMacosBridge, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator, badgeDebloat;
+    private TextView tvNoVncUrl, tvVncAddr, tvMacosVnc, tvMacosSsh, tvMacosShares, tvDiskInfo, tvConsole, tvBusyStatus;
     private ScrollView consoleScroll;
+
+    // Preset / Profile buttons
+    private Button btnProfileDocked, btnProfileBattery;
+    private Button btnRes1080, btnResPhone, btnRes720;
+    private Button btnRam44, btnRam52, btnRam60;
 
     // Persistent perf switches
     private final Map<String, Switch> toggleSwitches = new HashMap<>();
     private boolean updatingSwitches = false;
 
     private volatile String currentTailscaleIp = "";
+    private volatile boolean currentMacosRunning = false;
+    private volatile boolean currentWaylandRunning = false;
     private volatile boolean busy = false;
     private volatile boolean refreshing = false;
 
@@ -187,7 +194,7 @@ public class MainActivity extends Activity {
         titleLine.addView(title);
 
         TextView verPill = new TextView(this);
-        verPill.setText("v2.5");
+        verPill.setText("v2.7");
         verPill.setTextColor(Color.parseColor("#7DCFFF"));
         verPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         verPill.setTypeface(Typeface.DEFAULT_BOLD);
@@ -257,6 +264,7 @@ public class MainActivity extends Activity {
         badgeX11 = addStatusRow(statusCard, "Termux:X11 (:0)");
         badgeDesktop = addStatusRow(statusCard, "Desktop (XFCE4 + Plank)");
         badgeMacos = addStatusRow(statusCard, "macOS 27.2 VM (Gunyah)");
+        badgeMacosBridge = addStatusRow(statusCard, "macOS Bridge (Audio/Share)");
         badgeAudio = addStatusRow(statusCard, "PulseAudio (AAudio :4713)");
         badgeVnc = addStatusRow(statusCard, "Remote X (VNC + noVNC)");
         badgeBrowserGpu = addStatusRow(statusCard, "Brave / Electron GPU");
@@ -274,7 +282,7 @@ public class MainActivity extends Activity {
         btnStart.setOnClickListener(v -> runRootAction("Starting Debian GPU desktop...",
                 "/data/adb/debian-gpu.sh start", true));
         Button btnOpen = makeButton("Open Display", COL_BLUE, Color.WHITE, true);
-        btnOpen.setOnClickListener(v -> openTermuxX11());
+        btnOpen.setOnClickListener(v -> openActiveDisplay());
         addWeighted(row1, btnStart, 0, dp(5));
         addWeighted(row1, btnOpen, dp(5), 0);
         ctrlCard.addView(row1);
@@ -291,6 +299,39 @@ public class MainActivity extends Activity {
         addWeighted(rowMacos, btnStartMacos, 0, dp(5));
         addWeighted(rowMacos, btnStopMacos, dp(5), 0);
         ctrlCard.addView(rowMacos);
+
+        // macOS Resolution & RAM Presets (persisted in debian-gpu.conf)
+        LinearLayout rowMacRes = makeRow();
+        rowMacRes.setPadding(0, dp(6), 0, 0);
+        btnRes1080 = makeButton("1080p", COL_SURFACE_BTN, COL_MUTED, true);
+        btnRes1080.setOnClickListener(v -> runRootAction("Setting macOS display -> 1920x1080...",
+                "/data/adb/debian-gpu.sh set-macos-opt MACOS_RES 1920x1080", false));
+        btnResPhone = makeButton("Phone", COL_SURFACE_BTN, COL_MUTED, true);
+        btnResPhone.setOnClickListener(v -> runRootAction("Setting macOS display -> 2384x1100...",
+                "/data/adb/debian-gpu.sh set-macos-opt MACOS_RES 2384x1100", false));
+        btnRes720 = makeButton("720p Fast", COL_SURFACE_BTN, COL_MUTED, true);
+        btnRes720.setOnClickListener(v -> runRootAction("Setting macOS display -> 1280x720...",
+                "/data/adb/debian-gpu.sh set-macos-opt MACOS_RES 1280x720", false));
+        addWeightedHeight(rowMacRes, btnRes1080, 0, dp(4), 34);
+        addWeightedHeight(rowMacRes, btnResPhone, dp(4), dp(4), 34);
+        addWeightedHeight(rowMacRes, btnRes720, dp(4), 0, 34);
+        ctrlCard.addView(rowMacRes);
+
+        LinearLayout rowMacRam = makeRow();
+        rowMacRam.setPadding(0, dp(6), 0, 0);
+        btnRam44 = makeButton("4.4 GB RAM", COL_SURFACE_BTN, COL_MUTED, true);
+        btnRam44.setOnClickListener(v -> runRootAction("Setting macOS RAM -> 4400 MB...",
+                "/data/adb/debian-gpu.sh set-macos-opt MACOS_RAM_MB 4400", false));
+        btnRam52 = makeButton("5.2 GB RAM", COL_SURFACE_BTN, COL_MUTED, true);
+        btnRam52.setOnClickListener(v -> runRootAction("Setting macOS RAM -> 5200 MB...",
+                "/data/adb/debian-gpu.sh set-macos-opt MACOS_RAM_MB 5200", false));
+        btnRam60 = makeButton("6.0 GB RAM", COL_SURFACE_BTN, COL_MUTED, true);
+        btnRam60.setOnClickListener(v -> runRootAction("Setting macOS RAM -> 6000 MB...",
+                "/data/adb/debian-gpu.sh set-macos-opt MACOS_RAM_MB 6000", false));
+        addWeightedHeight(rowMacRam, btnRam44, 0, dp(4), 34);
+        addWeightedHeight(rowMacRam, btnRam52, dp(4), dp(4), 34);
+        addWeightedHeight(rowMacRam, btnRam60, dp(4), 0, 34);
+        ctrlCard.addView(rowMacRam);
 
         LinearLayout row2 = makeRow();
         row2.setPadding(0, dp(8), 0, 0);
@@ -350,6 +391,19 @@ public class MainActivity extends Activity {
 
         // --- Persistent Performance & GPU Tweaks Card ---
         LinearLayout perfCard = makeCard("PERFORMANCE & GPU TWEAKS (PERSISTENT)");
+
+        LinearLayout profRow = makeRow();
+        profRow.setPadding(0, 0, 0, dp(10));
+        btnProfileDocked = makeButton("Docked Max", COL_PURPLE, Color.WHITE, true);
+        btnProfileDocked.setOnClickListener(v -> runRootAction("Applying Docked Max profile...",
+                "/data/adb/debian-gpu.sh profile docked", false));
+        btnProfileBattery = makeButton("Battery / Portable", COL_SURFACE_BTN, COL_MUTED, true);
+        btnProfileBattery.setOnClickListener(v -> runRootAction("Applying Battery / Portable profile...",
+                "/data/adb/debian-gpu.sh profile battery", false));
+        addWeightedHeight(profRow, btnProfileDocked, 0, dp(5), 38);
+        addWeightedHeight(profRow, btnProfileBattery, dp(5), 0, 38);
+        perfCard.addView(profRow);
+
         addToggleRow(perfCard, "PERF_HONOR_MODE", "Honor Performance Mode",
                 "Sets SmartModeStatus=4 and exempts Termux:X11 from background limits");
         addToggleRow(perfCard, "PERF_GPU_UNLOCK", "Unlock Adreno 850 Max Clock",
@@ -390,23 +444,28 @@ public class MainActivity extends Activity {
         perfCard.addView(btnResetPerf, resetLp);
         root.addView(perfCard);
 
-        // --- Remote X Access Card ---
-        LinearLayout remoteCard = makeCard("REMOTE X (TAILSCALE ONLY)");
+        // --- Remote X & macOS Access Card ---
+        LinearLayout remoteCard = makeCard("REMOTE X & MACOS (TAILSCALE ONLY)");
 
         tvNoVncUrl = new TextView(this);
         tvNoVncUrl.setTextColor(Color.parseColor("#7DCFFF"));
         tvNoVncUrl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         tvNoVncUrl.setTypeface(Typeface.MONOSPACE);
-        tvNoVncUrl.setText("noVNC: —");
+        tvNoVncUrl.setText("Debian noVNC: —");
         remoteCard.addView(tvNoVncUrl);
 
         tvVncAddr = new TextView(this);
         tvVncAddr.setTextColor(COL_MUTED);
         tvVncAddr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         tvVncAddr.setTypeface(Typeface.MONOSPACE);
-        tvVncAddr.setPadding(0, dp(3), 0, dp(10));
-        tvVncAddr.setText("VNC:   —");
+        tvVncAddr.setPadding(0, dp(3), 0, dp(6));
+        tvVncAddr.setText("Debian VNC:   —");
         remoteCard.addView(tvVncAddr);
+
+        tvMacosVnc = makeInfoLine(remoteCard, "macOS Screen: —", Color.parseColor("#C7D2FE"), 12, true);
+        tvMacosSsh = makeInfoLine(remoteCard, "macOS SSH:    —", COL_MUTED, 12, true);
+        tvMacosShares = makeInfoLine(remoteCard, "macOS Shares: /Volumes/Android · /Volumes/Debian", COL_MUTED, 11, false);
+        tvMacosShares.setPadding(0, dp(4), 0, dp(10));
 
         LinearLayout rRow1 = makeRow();
         Button btnCopyWeb = makeButton("Copy noVNC", COL_SURFACE_BTN, COL_TEXT, false);
@@ -428,6 +487,26 @@ public class MainActivity extends Activity {
         addWeighted(rRow1, btnCopyVnc, dp(4), dp(4));
         addWeighted(rRow1, btnOpenWeb, dp(4), 0);
         remoteCard.addView(rRow1);
+
+        LinearLayout rRow2 = makeRow();
+        rRow2.setPadding(0, dp(8), 0, 0);
+        Button btnCopyMacVnc = makeButton("macOS VNC", COL_SURFACE_BTN, Color.parseColor("#C7D2FE"), false);
+        btnCopyMacVnc.setOnClickListener(v -> {
+            String ip = TextUtils.isEmpty(currentTailscaleIp) ? "127.0.0.1" : currentTailscaleIp;
+            copyText("macOS Screen Sharing", "vnc://" + ip + ":5901");
+        });
+        Button btnCopyMacSsh = makeButton("macOS SSH", COL_SURFACE_BTN, Color.parseColor("#C7D2FE"), false);
+        btnCopyMacSsh.setOnClickListener(v -> {
+            String ip = TextUtils.isEmpty(currentTailscaleIp) ? "127.0.0.1" : currentTailscaleIp;
+            copyText("macOS SSH", "ssh xnu@" + ip + " -p 2223");
+        });
+        Button btnSyncBridge = makeButton("Sync Bridge", Color.parseColor("#1E293B"), Color.parseColor("#7DCFFF"), true);
+        btnSyncBridge.setOnClickListener(v -> runRootAction("Syncing macOS Audio, WebDAV, Clipboard & Tailscale forwards...",
+                "/data/adb/debian-gpu.sh macos-services", false));
+        addWeighted(rRow2, btnCopyMacVnc, 0, dp(4));
+        addWeighted(rRow2, btnCopyMacSsh, dp(4), dp(4));
+        addWeighted(rRow2, btnSyncBridge, dp(4), 0);
+        remoteCard.addView(rRow2);
 
         Button btnPasswd = makeButton("Change VNC Password", COL_SURFACE_BTN, COL_TEXT, false);
         LinearLayout.LayoutParams passLp = new LinearLayout.LayoutParams(
@@ -706,10 +785,19 @@ public class MainActivity extends Activity {
     }
 
     private void addWeighted(LinearLayout row, View v, int leftMargin, int rightMargin) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+        addWeightedHeight(row, v, leftMargin, rightMargin, 42);
+    }
+
+    private void addWeightedHeight(LinearLayout row, View v, int leftMargin, int rightMargin, int heightDp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(heightDp), 1f);
         lp.leftMargin = leftMargin;
         lp.rightMargin = rightMargin;
         row.addView(v, lp);
+    }
+
+    private void styleChip(Button b, boolean active, int activeBg, int activeFg) {
+        b.setBackground(rounded(active ? activeBg : COL_SURFACE_BTN, active ? 0 : COL_CARD_BORDER, 9));
+        b.setTextColor(active ? activeFg : COL_MUTED);
     }
 
     private Button makeButton(String text, int bg, int fg, boolean bold) {
@@ -750,6 +838,22 @@ public class MainActivity extends Activity {
         if (cm != null) {
             cm.setPrimaryClip(ClipData.newPlainText(label, text));
             Toast.makeText(this, "Copied " + label, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void openDirectDisplay(String mode) {
+        Intent i = new Intent(this, DisplayActivity.class);
+        i.putExtra(DisplayActivity.EXTRA_MODE, mode);
+        startActivity(i);
+    }
+
+    private void openActiveDisplay() {
+        if (currentMacosRunning) {
+            openDirectDisplay("mac");
+        } else if (currentWaylandRunning) {
+            openDirectDisplay("wayland");
+        } else {
+            openTermuxX11();
         }
     }
 
@@ -866,7 +970,7 @@ public class MainActivity extends Activity {
             setBusy(false, r.code == 0 ? "Done" : "Finished with code " + r.code);
             refreshStatusInternal();
             if (openDisplayAfter && r.code == 0) {
-                ui.postDelayed(this::openTermuxX11, 500);
+                ui.postDelayed(this::openActiveDisplay, 500);
             }
         });
     }
@@ -920,7 +1024,17 @@ public class MainActivity extends Activity {
         final boolean macosAvail = "1".equals(m.get("MACOS_AVAIL"));
         final boolean macosVm = "1".equals(m.get("MACOS_VM"));
         final boolean macosView = "1".equals(m.get("MACOS_VIEW"));
+        final boolean waylandOn = "1".equals(m.get("WAYLAND"));
+        currentMacosRunning = macosVm;
+        currentWaylandRunning = waylandOn;
         final boolean macosReady = "1".equals(m.get("MACOS_READY"));
+        final boolean macosAudio = "1".equals(m.get("MACOS_AUDIO"));
+        final boolean macosBridge = "1".equals(m.get("MACOS_BRIDGE"));
+        final boolean macosRemote = "1".equals(m.get("MACOS_REMOTE"));
+        final String macosIp = m.getOrDefault("MACOS_IP", "");
+        final String macosRes = m.getOrDefault("MACOS_RES", "1920x1080");
+        final String macosRam = m.getOrDefault("MACOS_RAM_MB", "4400");
+        final String activeProfile = m.getOrDefault("PROFILE", "custom");
         final boolean vnc = "1".equals(m.get("VNC"));
         final boolean novnc = "1".equals(m.get("NOVNC"));
         final String pulse = m.getOrDefault("PULSE", "stopped");
@@ -1060,6 +1174,26 @@ public class MainActivity extends Activity {
                 setBadge(badgeMacos, "Stopped", offFg, offBg);
             }
 
+            if (macosAudio && macosBridge) {
+                setBadge(badgeMacosBridge, TextUtils.isEmpty(macosIp) ? "Audio + Share" : "Live (" + macosIp + ")", okFg, okBg);
+            } else if (macosAudio || macosBridge) {
+                setBadge(badgeMacosBridge, macosAudio ? "Audio Only" : "Share Only", warnFg, warnBg);
+            } else {
+                setBadge(badgeMacosBridge, "Stopped", offFg, offBg);
+            }
+
+            int indigoBg = Color.parseColor("#4F46E5");
+            styleChip(btnRes1080, "1920x1080".equals(macosRes), indigoBg, Color.WHITE);
+            styleChip(btnResPhone, "2384x1100".equals(macosRes), indigoBg, Color.WHITE);
+            styleChip(btnRes720, "1280x720".equals(macosRes), indigoBg, Color.WHITE);
+
+            styleChip(btnRam44, "4400".equals(macosRam), indigoBg, Color.WHITE);
+            styleChip(btnRam52, "5200".equals(macosRam), indigoBg, Color.WHITE);
+            styleChip(btnRam60, "6000".equals(macosRam), indigoBg, Color.WHITE);
+
+            styleChip(btnProfileDocked, "docked".equals(activeProfile), COL_PURPLE, Color.WHITE);
+            styleChip(btnProfileBattery, "battery".equals(activeProfile), Color.parseColor("#0D9488"), Color.WHITE);
+
             if ("aaudio".equals(pulse)) {
                 setBadge(badgeAudio, "AAudio Live", okFg, okBg);
             } else if ("null".equals(pulse)) {
@@ -1090,8 +1224,10 @@ public class MainActivity extends Activity {
             }
 
             String host = TextUtils.isEmpty(ts) ? "127.0.0.1" : ts;
-            tvNoVncUrl.setText("noVNC: http://" + host + ":6080/vnc.html");
-            tvVncAddr.setText("VNC:   " + host + ":5900" + (TextUtils.isEmpty(ts) ? " (Tailscale offline)" : " (Tailscale)"));
+            tvNoVncUrl.setText("Debian noVNC: http://" + host + ":6080/vnc.html");
+            tvVncAddr.setText("Debian VNC:   " + host + ":5900" + (TextUtils.isEmpty(ts) ? " (Tailscale offline)" : " (Tailscale)"));
+            tvMacosVnc.setText("macOS Screen: vnc://" + host + ":5901" + (macosRemote ? " (Live)" : " (Tap Sync Bridge)"));
+            tvMacosSsh.setText("macOS SSH:    ssh xnu@" + host + " -p 2223");
             tvDiskInfo.setText(TextUtils.isEmpty(disk)
                     ? "Image: /data/adb/debian-gpu.img (unmounted)"
                     : "Chroot disk: " + disk + " · /data/adb/debian-gpu.img");
