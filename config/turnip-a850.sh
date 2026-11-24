@@ -21,3 +21,6 @@ export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
 export QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-gtk3}"
 
 export DISPLAY="${DISPLAY:-:0}"
+
+# Termux PulseAudio TCP bridge (AAudio_sink on 127.0.0.1:4713)
+export PULSE_SERVER="${PULSE_SERVER:-127.0.0.1}"

@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -25,6 +26,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -32,6 +34,9 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -43,40 +48,88 @@ public class MainActivity extends Activity {
     private static final int COL_TEXT = Color.parseColor("#E6E9F2");
     private static final int COL_MUTED = Color.parseColor("#8B92A8");
     private static final int COL_BLUE = Color.parseColor("#3B82F6");
+    private static final int COL_CYAN = Color.parseColor("#0EA5E9");
     private static final int COL_GREEN = Color.parseColor("#22C55E");
+    private static final int COL_RED = Color.parseColor("#EF4444");
     private static final int COL_AMBER = Color.parseColor("#F59E0B");
     private static final int COL_PURPLE = Color.parseColor("#8B5CF6");
     private static final int COL_SURFACE_BTN = Color.parseColor("#242938");
     private static final int COL_CONSOLE_BG = Color.parseColor("#0B0D12");
+    private static final int COL_BAR_TRACK = Color.parseColor("#11141D");
+
+    private static final long LIVE_POLL_MS = 2500L;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeVnc, badgeGpu;
+    // Header
+    private Button btnLiveToggle;
+    private volatile boolean liveEnabled = true;
+
+    // Live telemetry views
+    private MeterRow meterCpu0, meterCpu3, meterCpu6, meterGpu;
+    private TextView tvGpuDetail, tvThermalsLine, tvPowerLine, tvMemLine, tvLauncherWarn;
+
+    // System status badges
+    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeAudio, badgeVnc, badgeBrowserGpu;
     private TextView tvNoVncUrl, tvVncAddr, tvDiskInfo, tvConsole, tvBusyStatus;
     private ScrollView consoleScroll;
 
+    // Persistent perf switches
+    private final Map<String, Switch> toggleSwitches = new HashMap<>();
+    private boolean updatingSwitches = false;
+
     private volatile String currentTailscaleIp = "";
     private volatile boolean busy = false;
+    private volatile boolean refreshing = false;
+
+    private final Runnable livePollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (liveEnabled && !busy && !refreshing) {
+                refreshStatus(true);
+            }
+            if (liveEnabled) {
+                ui.postDelayed(this, LIVE_POLL_MS);
+            }
+        }
+    };
+
+    private static class MeterRow {
+        TextView tvValue;
+        View fillView;
+        View restView;
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
-        refreshStatus();
+        refreshStatus(false);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        ui.removeCallbacks(livePollRunnable);
         if (!busy) {
-            refreshStatus();
+            refreshStatus(true);
         }
+        if (liveEnabled) {
+            ui.postDelayed(livePollRunnable, LIVE_POLL_MS);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        ui.removeCallbacks(livePollRunnable);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        ui.removeCallbacks(livePollRunnable);
         executor.shutdownNow();
     }
 
@@ -102,7 +155,7 @@ public class MainActivity extends Activity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        final int padH = dp(16), padTop = dp(16), padBot = dp(28);
+        final int padH = dp(14), padTop = dp(14), padBot = dp(28);
         root.setPadding(padH, padTop, padH, padBot);
         rootScroll.setOnApplyWindowInsetsListener((v, insets) -> {
             android.graphics.Insets bars = insets.getInsets(
@@ -117,56 +170,97 @@ public class MainActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(4), dp(8), dp(4), dp(16));
+        header.setPadding(dp(4), dp(6), dp(4), dp(14));
 
         LinearLayout titleBox = new LinearLayout(this);
         titleBox.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+
+        LinearLayout titleLine = new LinearLayout(this);
+        titleLine.setOrientation(LinearLayout.HORIZONTAL);
+        titleLine.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
         title.setText("Debian GPU");
         title.setTextColor(COL_TEXT);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        titleBox.addView(title);
+        titleLine.addView(title);
+
+        TextView verPill = new TextView(this);
+        verPill.setText("v2.0");
+        verPill.setTextColor(Color.parseColor("#7DCFFF"));
+        verPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        verPill.setTypeface(Typeface.DEFAULT_BOLD);
+        verPill.setPadding(dp(7), dp(2), dp(7), dp(2));
+        verPill.setBackground(rounded(Color.parseColor("#142838"), 0, 10));
+        LinearLayout.LayoutParams verLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        verLp.leftMargin = dp(8);
+        titleLine.addView(verPill, verLp);
+        titleBox.addView(titleLine);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Adreno 850 Turnip · Vulkan 1.4 · OpenGL 4.6");
+        subtitle.setText("Adreno 850 Turnip (Mesa 27.0) · Vulkan 1.4");
         subtitle.setTextColor(COL_MUTED);
-        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         titleBox.addView(subtitle);
-        header.addView(titleBox, titleLp);
+        header.addView(titleBox, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        btnLiveToggle = makeButton("Live", Color.parseColor("#143322"), Color.parseColor("#4ADE80"), true);
+        btnLiveToggle.setOnClickListener(v -> toggleLivePolling());
+        LinearLayout.LayoutParams liveLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36));
+        liveLp.rightMargin = dp(6);
+        header.addView(btnLiveToggle, liveLp);
 
         Button btnRefresh = makeButton("Refresh", COL_SURFACE_BTN, COL_TEXT, false);
-        btnRefresh.setOnClickListener(v -> refreshStatus());
-        header.addView(btnRefresh, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)));
+        btnRefresh.setOnClickListener(v -> refreshStatus(false));
+        header.addView(btnRefresh, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)));
         root.addView(header);
+
+        // --- Live CPU / GPU / Thermal Telemetry Card ---
+        LinearLayout teleCard = makeCard("LIVE CPU / GPU / THERMAL TELEMETRY");
+        meterCpu0 = addMeterRow(teleCard, "CPU Little (0-2)", COL_BLUE);
+        meterCpu3 = addMeterRow(teleCard, "CPU Big (3-5)", COL_CYAN);
+        meterCpu6 = addMeterRow(teleCard, "CPU Prime (6-7)", COL_PURPLE);
+        meterGpu = addMeterRow(teleCard, "Adreno 850 GPU", COL_GREEN);
+
+        tvGpuDetail = makeInfoLine(teleCard, "KGSL: —", COL_MUTED, 11, true);
+        tvThermalsLine = makeInfoLine(teleCard, "Temps: —", Color.parseColor("#A9B1D6"), 12, true);
+        tvPowerLine = makeInfoLine(teleCard, "Power: —", COL_MUTED, 11, true);
+        tvMemLine = makeInfoLine(teleCard, "Memory: —", COL_MUTED, 11, true);
+
+        tvLauncherWarn = new TextView(this);
+        tvLauncherWarn.setText("Honor Launcher is active on phone screen — PowerGenius caps CPU to ~2.4 GHz until another app is open on phone.");
+        tvLauncherWarn.setTextColor(Color.parseColor("#FBBF24"));
+        tvLauncherWarn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        tvLauncherWarn.setBackground(rounded(Color.parseColor("#332914"), Color.parseColor("#664D1A"), 8));
+        tvLauncherWarn.setPadding(dp(10), dp(7), dp(10), dp(7));
+        LinearLayout.LayoutParams warnLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        warnLp.topMargin = dp(8);
+        tvLauncherWarn.setVisibility(View.GONE);
+        teleCard.addView(tvLauncherWarn, warnLp);
+        root.addView(teleCard);
 
         // --- Live Status Card ---
         LinearLayout statusCard = makeCard("SYSTEM STATUS");
-        badgeRoot = addStatusRow(statusCard, "Root (su -M)");
+        badgeRoot = addStatusRow(statusCard, "Root (KernelSU)");
         badgeRoot.setOnClickListener(v -> {
             Intent ksu = getPackageManager().getLaunchIntentForPackage("me.weishu.kernelsu");
             if (ksu != null) {
                 startActivity(ksu);
             } else {
-                Toast.makeText(this, "Grant root to Debian GPU in KernelSU / Magisk", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "Grant root to Debian GPU in KernelSU Manager", Toast.LENGTH_LONG).show();
             }
         });
         badgeMount = addStatusRow(statusCard, "Debian 13 Chroot");
         badgeX11 = addStatusRow(statusCard, "Termux:X11 (:0)");
-        badgeDesktop = addStatusRow(statusCard, "macOS Desktop (XFCE + Plank)");
+        badgeDesktop = addStatusRow(statusCard, "Desktop (XFCE4 + Plank)");
+        badgeAudio = addStatusRow(statusCard, "PulseAudio (AAudio :4713)");
         badgeVnc = addStatusRow(statusCard, "Remote X (VNC + noVNC)");
-        badgeGpu = addStatusRow(statusCard, "Adreno GPU");
+        badgeBrowserGpu = addStatusRow(statusCard, "Brave / Electron GPU");
 
-        tvDiskInfo = new TextView(this);
-        tvDiskInfo.setTextColor(COL_MUTED);
-        tvDiskInfo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        tvDiskInfo.setPadding(0, dp(8), 0, 0);
-        tvDiskInfo.setText("Image: /data/adb/debian-gpu.img");
-        statusCard.addView(tvDiskInfo);
+        tvDiskInfo = makeInfoLine(statusCard, "Image: /data/adb/debian-gpu.img", COL_MUTED, 11, false);
         root.addView(statusCard);
 
         // --- Desktop Controls Card ---
@@ -178,12 +272,12 @@ public class MainActivity extends Activity {
                 "/data/adb/debian-gpu.sh start", true));
         Button btnOpen = makeButton("Open Display", COL_BLUE, Color.WHITE, true);
         btnOpen.setOnClickListener(v -> openTermuxX11());
-        addWeighted(row1, btnStart, 0, dp(6));
-        addWeighted(row1, btnOpen, dp(6), 0);
+        addWeighted(row1, btnStart, 0, dp(5));
+        addWeighted(row1, btnOpen, dp(5), 0);
         ctrlCard.addView(row1);
 
         LinearLayout row2 = makeRow();
-        row2.setPadding(0, dp(10), 0, 0);
+        row2.setPadding(0, dp(8), 0, 0);
         Button btnStop = makeButton("Stop Desktop", COL_SURFACE_BTN, COL_TEXT, false);
         btnStop.setOnClickListener(v -> runRootAction("Stopping desktop & VNC...",
                 "/data/adb/debian-gpu.sh stop", false));
@@ -191,26 +285,73 @@ public class MainActivity extends Activity {
                 Color.parseColor("#FCA5A5"), false);
         btnUmount.setOnClickListener(v -> runRootAction("Stopping & unmounting ext4 image...",
                 "/data/adb/debian-gpu.sh umount", false));
-        addWeighted(row2, btnStop, 0, dp(6));
-        addWeighted(row2, btnUmount, dp(6), 0);
+        addWeighted(row2, btnStop, 0, dp(5));
+        addWeighted(row2, btnUmount, dp(5), 0);
         ctrlCard.addView(row2);
+
+        LinearLayout row3 = makeRow();
+        row3.setPadding(0, dp(8), 0, 0);
+        Button btnApplyPerf = makeButton("Apply Perf Now", COL_PURPLE, Color.WHITE, true);
+        btnApplyPerf.setOnClickListener(v -> runRootAction("Applying persistent performance tweaks...",
+                "/data/adb/debian-gpu.sh perf", false));
+        Button btnFixAudio = makeButton("Fix Audio Sink", Color.parseColor("#133040"),
+                Color.parseColor("#7DCFFF"), true);
+        btnFixAudio.setOnClickListener(v -> runRootAction("Repairing Termux PulseAudio AAudio_sink...",
+                "/data/adb/debian-gpu.sh audio-fix", false));
+        addWeighted(row3, btnApplyPerf, 0, dp(5));
+        addWeighted(row3, btnFixAudio, dp(5), 0);
+        ctrlCard.addView(row3);
         root.addView(ctrlCard);
+
+        // --- Persistent Performance & GPU Tweaks Card ---
+        LinearLayout perfCard = makeCard("PERFORMANCE & GPU TWEAKS (PERSISTENT)");
+        addToggleRow(perfCard, "PERF_HONOR_MODE", "Honor Performance Mode",
+                "Sets SmartModeStatus=4 and exempts Termux:X11 from background limits");
+        addToggleRow(perfCard, "PERF_GPU_UNLOCK", "Unlock Adreno 850 Max Clock",
+                "Sets KGSL thermal_pwrlevel=0 (full 1450 MHz ceiling)");
+        addToggleRow(perfCard, "PERF_GPU_RAMP", "GPU Fast Ramp (+24% FPS)",
+                "Wake at 951 MHz (pwrlevel 7) + 500ms idle timer (prevents 222 MHz drops)");
+        addToggleRow(perfCard, "PERF_GPU_MAX_WAKE", "GPU Max Wake (Docked)",
+                "Wake directly at 1450 MHz (pwrlevel 0) for zero ramp lag when plugged in");
+        addToggleRow(perfCard, "PERF_CPU_UNLOCK", "Unlock CPU Max Clocks",
+                "Raises msm_performance & scaling_max_freq to 3.74 / 4.03 / 5.01 GHz");
+        addToggleRow(perfCard, "PERF_WALT_BURST", "WALT CPU Burst Tuning",
+                "hispeed_load=70, predictive load (pl=1), higher hispeed freqs (2.19/2.65/3.57 GHz)");
+        addToggleRow(perfCard, "PERF_VM_IO", "RAM & Chroot Disk I/O Tuning",
+                "vm.swappiness=20, vfs_cache_pressure=50, loop read-ahead 512 KB");
+        addToggleRow(perfCard, "PERF_XFCE_OPT", "XFCE4 No Shadows + XPresent",
+                "Disables CPU XRender frame/popup shadows & enables smooth XPresent sync");
+        addToggleRow(perfCard, "PERF_CHROMIUM_VULKAN", "Native Vulkan (Brave / Electron)",
+                "Skia GaneshVulkan + ANGLE Vulkan directly on Turnip Mesa 27.0 (+29% WebGL)");
+        addToggleRow(perfCard, "PERF_PULSEAUDIO", "PulseAudio Bridge (AAudio :4713)",
+                "Auto-starts Android audio bridge for YouTube & Linux apps");
+        addToggleRow(perfCard, "PERF_BOOT_PERSIST", "Auto-Apply on Reboot (service.d)",
+                "Installs KernelSU boot hook to re-apply enabled sysfs tweaks on startup");
+
+        Button btnResetPerf = makeButton("Restore Stock Defaults", Color.parseColor("#2A2226"),
+                Color.parseColor("#FCA5A5"), false);
+        LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
+        resetLp.topMargin = dp(10);
+        btnResetPerf.setOnClickListener(v -> confirmResetPerf());
+        perfCard.addView(btnResetPerf, resetLp);
+        root.addView(perfCard);
 
         // --- Remote X Access Card ---
         LinearLayout remoteCard = makeCard("REMOTE X (TAILSCALE ONLY)");
 
         tvNoVncUrl = new TextView(this);
         tvNoVncUrl.setTextColor(Color.parseColor("#7DCFFF"));
-        tvNoVncUrl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tvNoVncUrl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         tvNoVncUrl.setTypeface(Typeface.MONOSPACE);
         tvNoVncUrl.setText("noVNC: —");
         remoteCard.addView(tvNoVncUrl);
 
         tvVncAddr = new TextView(this);
         tvVncAddr.setTextColor(COL_MUTED);
-        tvVncAddr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tvVncAddr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         tvVncAddr.setTypeface(Typeface.MONOSPACE);
-        tvVncAddr.setPadding(0, dp(4), 0, dp(12));
+        tvVncAddr.setPadding(0, dp(3), 0, dp(10));
         tvVncAddr.setText("VNC:   —");
         remoteCard.addView(tvVncAddr);
 
@@ -228,8 +369,7 @@ public class MainActivity extends Activity {
         Button btnOpenWeb = makeButton("Open Web", COL_PURPLE, Color.WHITE, false);
         btnOpenWeb.setOnClickListener(v -> {
             String ip = TextUtils.isEmpty(currentTailscaleIp) ? "127.0.0.1" : currentTailscaleIp;
-            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse("http://" + ip + ":6080/vnc.html"));
-            startActivity(i);
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("http://" + ip + ":6080/vnc.html")));
         });
         addWeighted(rRow1, btnCopyWeb, 0, dp(4));
         addWeighted(rRow1, btnCopyVnc, dp(4), dp(4));
@@ -239,7 +379,7 @@ public class MainActivity extends Activity {
         Button btnPasswd = makeButton("Change VNC Password", COL_SURFACE_BTN, COL_TEXT, false);
         LinearLayout.LayoutParams passLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
-        passLp.topMargin = dp(10);
+        passLp.topMargin = dp(8);
         btnPasswd.setOnClickListener(v -> showVncPasswordDialog());
         remoteCard.addView(btnPasswd, passLp);
         root.addView(remoteCard);
@@ -251,31 +391,52 @@ public class MainActivity extends Activity {
         btnTerm.setOnClickListener(v -> runRootAction("Opening terminal on DISPLAY=:0...",
                 "chroot /data/local/debian-gpu /bin/su - droid -c '. /etc/profile.d/turnip-a850.sh && nohup xfce4-terminal >/dev/null 2>&1 </dev/null &'",
                 true));
+        Button btnBrave = makeButton("Launch Brave", COL_SURFACE_BTN, COL_TEXT, false);
+        btnBrave.setOnClickListener(v -> runRootAction("Opening Brave (Vulkan) on DISPLAY=:0...",
+                "chroot /data/local/debian-gpu /bin/su - droid -c '. /etc/profile.d/turnip-a850.sh && nohup /usr/local/bin/brave-browser-stable >/tmp/brave.log 2>&1 </dev/null &'",
+                true));
+        addWeighted(tRow1, btnTerm, 0, dp(5));
+        addWeighted(tRow1, btnBrave, dp(5), 0);
+        toolsCard.addView(tRow1);
+
+        LinearLayout tRow2 = makeRow();
+        tRow2.setPadding(0, dp(8), 0, 0);
         Button btnGpuCheck = makeButton("Verify GPU", COL_SURFACE_BTN, COL_TEXT, false);
         btnGpuCheck.setOnClickListener(v -> runRootAction("Probing Adreno 850 Turnip + Zink...",
                 "chroot /data/local/debian-gpu /bin/su - droid -c '. /etc/profile.d/turnip-a850.sh && vulkaninfo --summary 2>&1 | grep -E \"apiVersion|deviceName|driverName|driverInfo\" && echo \"---\" && glxinfo -B 2>&1 | grep -E \"Accelerated|renderer string|core profile version\"'",
                 false));
-        addWeighted(tRow1, btnTerm, 0, dp(6));
-        addWeighted(tRow1, btnGpuCheck, dp(6), 0);
-        toolsCard.addView(tRow1);
+        Button btnRestartVnc = makeButton("Restart VNC", COL_SURFACE_BTN, COL_TEXT, false);
+        btnRestartVnc.setOnClickListener(v -> runRootAction("Restarting VNC + Tailscale proxy...",
+                "/data/adb/debian-gpu.sh vnc", false));
+        addWeighted(tRow2, btnGpuCheck, 0, dp(5));
+        addWeighted(tRow2, btnRestartVnc, dp(5), 0);
+        toolsCard.addView(tRow2);
 
-        Button btnBench = makeButton("Run 720p GPU Benchmark (glmark2)", COL_SURFACE_BTN, COL_MUTED, false);
-        LinearLayout.LayoutParams benchLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
-        benchLp.topMargin = dp(10);
-        btnBench.setOnClickListener(v -> runRootAction("Running 720p offscreen glmark2...",
-                "/data/adb/debian-gpu.sh verify --bench", false));
-        toolsCard.addView(btnBench, benchLp);
+        Button btnAudioFix = makeButton("Fix AVF Terminal Audio (SELinux)", COL_SURFACE_BTN, COL_MUTED, false);
+        LinearLayout.LayoutParams audioLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(38));
+        audioLp.topMargin = dp(8);
+        btnAudioFix.setOnClickListener(v -> runRootAction("Applying crosvm_vu_snd SELinux audio rules...",
+                "/data/adb/fix-terminal.sh", false));
+        toolsCard.addView(btnAudioFix, audioLp);
         root.addView(toolsCard);
 
         // --- Console Output Card ---
         LinearLayout logCard = makeCard("CONSOLE OUTPUT");
+        LinearLayout logTop = makeRow();
+        logTop.setGravity(Gravity.CENTER_VERTICAL);
+        logTop.setPadding(0, 0, 0, dp(6));
+
         tvBusyStatus = new TextView(this);
-        tvBusyStatus.setTextColor(COL_AMBER);
+        tvBusyStatus.setTextColor(COL_GREEN);
         tvBusyStatus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        tvBusyStatus.setPadding(0, 0, 0, dp(6));
         tvBusyStatus.setText("Idle");
-        logCard.addView(tvBusyStatus);
+        logTop.addView(tvBusyStatus, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button btnClear = makeButton("Clear", COL_SURFACE_BTN, COL_MUTED, false);
+        btnClear.setOnClickListener(v -> tvConsole.setText(""));
+        logTop.addView(btnClear, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30)));
+        logCard.addView(logTop);
 
         consoleScroll = new ScrollView(this);
         consoleScroll.setBackground(rounded(COL_CONSOLE_BG, COL_CARD_BORDER, 10));
@@ -288,20 +449,36 @@ public class MainActivity extends Activity {
         tvConsole.setText("Ready.\n");
         consoleScroll.addView(tvConsole);
         logCard.addView(consoleScroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(170)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(160)));
         root.addView(logCard);
 
         return rootScroll;
+    }
+
+    private void toggleLivePolling() {
+        liveEnabled = !liveEnabled;
+        ui.removeCallbacks(livePollRunnable);
+        if (liveEnabled) {
+            btnLiveToggle.setText("Live");
+            btnLiveToggle.setTextColor(Color.parseColor("#4ADE80"));
+            btnLiveToggle.setBackground(rounded(Color.parseColor("#143322"), 0, 10));
+            ui.postDelayed(livePollRunnable, LIVE_POLL_MS);
+            refreshStatus(true);
+        } else {
+            btnLiveToggle.setText("Paused");
+            btnLiveToggle.setTextColor(COL_MUTED);
+            btnLiveToggle.setBackground(rounded(COL_SURFACE_BTN, 0, 10));
+        }
     }
 
     private LinearLayout makeCard(String headerTitle) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setBackground(rounded(COL_CARD, COL_CARD_BORDER, 14));
-        card.setPadding(dp(14), dp(14), dp(14), dp(14));
+        card.setPadding(dp(14), dp(13), dp(14), dp(13));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(14);
+        lp.bottomMargin = dp(12);
         card.setLayoutParams(lp);
 
         TextView tv = new TextView(this);
@@ -310,9 +487,131 @@ public class MainActivity extends Activity {
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         tv.setTypeface(Typeface.DEFAULT_BOLD);
         tv.setLetterSpacing(0.08f);
-        tv.setPadding(0, 0, 0, dp(10));
+        tv.setPadding(0, 0, 0, dp(8));
         card.addView(tv);
         return card;
+    }
+
+    private TextView makeInfoLine(LinearLayout parent, String text, int color, int sp, boolean mono) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(color);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        if (mono) tv.setTypeface(Typeface.MONOSPACE);
+        tv.setPadding(0, dp(4), 0, 0);
+        parent.addView(tv);
+        return tv;
+    }
+
+    private MeterRow addMeterRow(LinearLayout parent, String label, int barColor) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, dp(3), 0, dp(6));
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView tvLabel = new TextView(this);
+        tvLabel.setText(label);
+        tvLabel.setTextColor(COL_TEXT);
+        tvLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        tvLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        top.addView(tvLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView tvVal = new TextView(this);
+        tvVal.setText("—");
+        tvVal.setTextColor(Color.parseColor("#A9B1D6"));
+        tvVal.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        tvVal.setTypeface(Typeface.MONOSPACE);
+        top.addView(tvVal);
+        box.addView(top);
+
+        LinearLayout barTrack = new LinearLayout(this);
+        barTrack.setOrientation(LinearLayout.HORIZONTAL);
+        barTrack.setBackground(rounded(COL_BAR_TRACK, COL_CARD_BORDER, 4));
+        LinearLayout.LayoutParams trackLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(7));
+        trackLp.topMargin = dp(4);
+
+        View fill = new View(this);
+        fill.setBackground(rounded(barColor, 0, 4));
+        View rest = new View(this);
+        barTrack.addView(fill, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.01f));
+        barTrack.addView(rest, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.99f));
+        box.addView(barTrack, trackLp);
+
+        parent.addView(box);
+        MeterRow mr = new MeterRow();
+        mr.tvValue = tvVal;
+        mr.fillView = fill;
+        mr.restView = rest;
+        return mr;
+    }
+
+    private void updateMeter(MeterRow mr, String text, float fraction, int barColor, int textColor) {
+        float f = Math.max(0.01f, Math.min(1.0f, fraction));
+        mr.tvValue.setText(text);
+        mr.tvValue.setTextColor(textColor);
+        mr.fillView.setBackground(rounded(barColor, 0, 4));
+        LinearLayout.LayoutParams flp = (LinearLayout.LayoutParams) mr.fillView.getLayoutParams();
+        LinearLayout.LayoutParams rlp = (LinearLayout.LayoutParams) mr.restView.getLayoutParams();
+        flp.weight = f;
+        rlp.weight = Math.max(0.001f, 1.0f - f);
+        mr.fillView.setLayoutParams(flp);
+        mr.restView.setLayoutParams(rlp);
+    }
+
+    private void addToggleRow(LinearLayout parent, String key, String title, String desc) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(6));
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+
+        TextView tvT = new TextView(this);
+        tvT.setText(title);
+        tvT.setTextColor(COL_TEXT);
+        tvT.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tvT.setTypeface(Typeface.DEFAULT_BOLD);
+        textCol.addView(tvT);
+
+        TextView tvD = new TextView(this);
+        tvD.setText(desc);
+        tvD.setTextColor(COL_MUTED);
+        tvD.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        textCol.addView(tvD);
+
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.rightMargin = dp(10);
+        row.addView(textCol, tlp);
+
+        Switch sw = new Switch(this);
+        ColorStateList thumbTint = new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{Color.parseColor("#4ADE80"), Color.parseColor("#9CA3AF")});
+        ColorStateList trackTint = new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{Color.parseColor("#166534"), Color.parseColor("#374151")});
+        sw.setThumbTintList(thumbTint);
+        sw.setTrackTintList(trackTint);
+        sw.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (updatingSwitches) return;
+            String val = isChecked ? "1" : "0";
+            runRootAction("Toggle " + title + " -> " + (isChecked ? "ON" : "OFF"),
+                    "/data/adb/debian-gpu.sh set-toggle " + key + " " + val, false);
+        });
+        row.addView(sw);
+        parent.addView(row);
+
+        // Subtle divider
+        View div = new View(this);
+        div.setBackgroundColor(Color.parseColor("#202434"));
+        parent.addView(div, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
+
+        toggleSwitches.put(key, sw);
     }
 
     private TextView addStatusRow(LinearLayout parent, String label) {
@@ -324,16 +623,16 @@ public class MainActivity extends Activity {
         TextView tvLabel = new TextView(this);
         tvLabel.setText(label);
         tvLabel.setTextColor(COL_TEXT);
-        tvLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        tvLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         row.addView(tvLabel, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView badge = new TextView(this);
         badge.setText("...");
         badge.setTextColor(COL_MUTED);
-        badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         badge.setTypeface(Typeface.DEFAULT_BOLD);
-        badge.setPadding(dp(10), dp(3), dp(10), dp(3));
+        badge.setPadding(dp(9), dp(3), dp(9), dp(3));
         badge.setBackground(rounded(COL_SURFACE_BTN, 0, 12));
         row.addView(badge);
 
@@ -350,7 +649,7 @@ public class MainActivity extends Activity {
     }
 
     private void addWeighted(LinearLayout row, View v, int leftMargin, int rightMargin) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
         lp.leftMargin = leftMargin;
         lp.rightMargin = rightMargin;
         row.addView(v, lp);
@@ -361,7 +660,7 @@ public class MainActivity extends Activity {
         b.setText(text);
         b.setAllCaps(false);
         b.setTextColor(fg);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         if (bold) b.setTypeface(Typeface.DEFAULT_BOLD);
         b.setBackground(rounded(bg, 0, 10));
         b.setPadding(dp(10), 0, dp(10), 0);
@@ -408,6 +707,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void confirmResetPerf() {
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Restore Stock Defaults?")
+                .setMessage("Resets CPU/GPU/WALT/VM/XFCE/Vulkan toggles back to stock defaults (keeps PulseAudio enabled).")
+                .setPositiveButton("Restore", (d, w) ->
+                        runRootAction("Restoring stock defaults...", "/data/adb/debian-gpu.sh reset-perf", false))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void showVncPasswordDialog() {
         final EditText input = new EditText(this);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -428,7 +737,7 @@ public class MainActivity extends Activity {
                     String escaped = pw.replace("'", "'\"'\"'");
                     String cmd = "chroot /data/local/debian-gpu /bin/su - droid -c "
                             + "\"mkdir -p ~/.vnc && printf '%s\\n' '" + escaped + "' | vncpasswd -f > ~/.vnc/passwd && chmod 600 ~/.vnc/passwd\" "
-                            + "&& /data/adb/debian-gpu.sh start";
+                            + "&& /data/adb/debian-gpu.sh vnc";
                     runRootAction("Updating VNC password & restarting VNC...", cmd, false);
                 })
                 .setNegativeButton("Cancel", null)
@@ -446,7 +755,6 @@ public class MainActivity extends Activity {
 
     private CmdResult execSu(String script) {
         try {
-            // -M enters the global mount namespace so chroot & Termux:X11 mounts are visible
             Process p = new ProcessBuilder("su", "-M").redirectErrorStream(true).start();
             OutputStream os = p.getOutputStream();
             os.write((script + "\nexit\n").getBytes(StandardCharsets.UTF_8));
@@ -486,60 +794,95 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void refreshStatus() {
-        if (busy) return;
-        setBusy(true, "Refreshing status...");
+    private void refreshStatus(boolean silent) {
+        if (busy || refreshing) return;
+        refreshing = true;
+        if (!silent) {
+            setBusy(true, "Refreshing telemetry...");
+        }
         executor.execute(() -> {
-            refreshStatusInternal();
-            setBusy(false, "Up to date");
+            try {
+                refreshStatusInternal();
+            } finally {
+                refreshing = false;
+                if (!silent) {
+                    setBusy(false, "Up to date");
+                }
+            }
         });
     }
 
+    private static long parseLongSafe(String s, long def) {
+        try {
+            return Long.parseLong(s.trim());
+        } catch (Exception e) {
+            return def;
+        }
+    }
+
+    private static String fmtGhz(long khz) {
+        return String.format(Locale.US, "%.2f", khz / 1_000_000.0);
+    }
+
     private void refreshStatusInternal() {
-        String probe = ""
-                + "echo ROOT=1\n"
-                + "mountpoint -q /data/local/debian-gpu && echo MOUNT=1 || echo MOUNT=0\n"
-                + "([ -S /data/data/com.termux/files/usr/tmp/.X11-unix/X0 ] || [ -S /data/local/debian-gpu/tmp/.X11-unix/X0 ] || ss -xl 2>/dev/null | grep -q 'X11-unix/X0') && (pgrep -f 'termux.x11' >/dev/null 2>&1 || pgrep -f 'Xwayland' >/dev/null 2>&1 || ss -xl 2>/dev/null | grep -q 'X11-unix/X0') && echo X11=1 || echo X11=0\n"
-                + "pgrep -x xfwm4 >/dev/null 2>&1 && echo DESKTOP=1 || echo DESKTOP=0\n"
-                + "pgrep -x plank >/dev/null 2>&1 && echo PLANK=1 || echo PLANK=0\n"
-                + "(pgrep -x x0vncserver >/dev/null 2>&1 || pgrep -x X0tigervnc >/dev/null 2>&1) && echo VNC=1 || echo VNC=0\n"
-                + "pgrep -f 'websockify.*6080' >/dev/null 2>&1 && echo NOVNC=1 || echo NOVNC=0\n"
-                + "TS=$(ip -4 addr show dev tun1 2>/dev/null | awk '/inet / {split($2,a,\"/\"); print a[1]; exit}' || ip -4 addr show 2>/dev/null | awk '/inet 100\\./ {split($2,a,\"/\"); print a[1]; exit}')\n"
-                + "echo TS=$TS\n"
-                + "CLK=$(cat /sys/class/kgsl/kgsl-3d0/clock_mhz 2>/dev/null || echo '?')\n"
-                + "BUSY=$(cat /sys/class/kgsl/kgsl-3d0/gpu_busy_percentage 2>/dev/null | tr -d ' ' || echo '?')\n"
-                + "echo GPU=\"${CLK}MHz (${BUSY})\"\n"
-                + "DISK=$(df -h /data/local/debian-gpu 2>/dev/null | awk 'NR==2{print $3\" / \"$2\" (\"$5\")\"}')\n"
-                + "echo DISK=\"$DISK\"\n";
-
-        CmdResult r = execSu(probe);
-        boolean hasRoot = false, mounted = false, x11 = false, desktop = false, plank = false, vnc = false, novnc = false;
-        String ts = "", gpu = "Adreno GPU", disk = "";
-
+        CmdResult r = execSu("/data/adb/debian-gpu.sh telemetry");
+        final Map<String, String> m = new HashMap<>();
         if (r.code == 0 && r.output != null) {
             for (String line : r.output.split("\n")) {
                 int idx = line.indexOf('=');
                 if (idx <= 0) continue;
-                String k = line.substring(0, idx).trim();
-                String v = line.substring(idx + 1).trim();
-                switch (k) {
-                    case "ROOT": hasRoot = "1".equals(v); break;
-                    case "MOUNT": mounted = "1".equals(v); break;
-                    case "X11": x11 = "1".equals(v); break;
-                    case "DESKTOP": desktop = "1".equals(v); break;
-                    case "PLANK": plank = "1".equals(v); break;
-                    case "VNC": vnc = "1".equals(v); break;
-                    case "NOVNC": novnc = "1".equals(v); break;
-                    case "TS": ts = v; break;
-                    case "GPU": gpu = v; break;
-                    case "DISK": disk = v; break;
-                }
+                m.put(line.substring(0, idx).trim(), line.substring(idx + 1).trim());
             }
         }
 
-        final boolean fRoot = hasRoot, fMounted = mounted, fX11 = x11, fDesktop = desktop, fPlank = plank, fVnc = vnc, fNovnc = novnc;
-        final String fTs = ts, fGpu = gpu, fDisk = disk;
+        final boolean hasRoot = "1".equals(m.get("ROOT"));
+        final boolean mounted = "1".equals(m.get("MOUNT"));
+        final boolean x11 = "1".equals(m.get("X11"));
+        final boolean desktop = "1".equals(m.get("DESKTOP"));
+        final boolean plank = "1".equals(m.get("PLANK"));
+        final boolean vnc = "1".equals(m.get("VNC"));
+        final boolean novnc = "1".equals(m.get("NOVNC"));
+        final String pulse = m.getOrDefault("PULSE", "stopped");
+        final String ts = m.getOrDefault("TS", "");
+        final String disk = m.getOrDefault("DISK", "");
         currentTailscaleIp = ts;
+
+        final long c0Cur = parseLongSafe(m.get("CPU0_CUR"), 0);
+        final long c0Max = parseLongSafe(m.get("CPU0_MAX"), 3744000);
+        final long c0Hw = Math.max(1, parseLongSafe(m.get("CPU0_HW"), 3744000));
+
+        final long c3Cur = parseLongSafe(m.get("CPU3_CUR"), 0);
+        final long c3Max = parseLongSafe(m.get("CPU3_MAX"), 4032000);
+        final long c3Hw = Math.max(1, parseLongSafe(m.get("CPU3_HW"), 4032000));
+
+        final long c6Cur = parseLongSafe(m.get("CPU6_CUR"), 0);
+        final long c6Max = parseLongSafe(m.get("CPU6_MAX"), 5011200);
+        final long c6Hw = Math.max(1, parseLongSafe(m.get("CPU6_HW"), 5011200));
+
+        final long gpuCur = parseLongSafe(m.get("GPU_CUR"), 0);
+        final long gpuMax = Math.max(1, parseLongSafe(m.get("GPU_MAX"), 1450));
+        final long gpuBusy = parseLongSafe(m.get("GPU_BUSY"), 0);
+        final String gpuTherm = m.getOrDefault("GPU_THERM_LVL", "?");
+        final String gpuWake = m.getOrDefault("GPU_WAKE_MHZ", "?");
+        final String gpuIdle = m.getOrDefault("GPU_IDLE_MS", "?");
+
+        final String tCpu = m.getOrDefault("TEMP_CPU", "?");
+        final String tGpu = m.getOrDefault("TEMP_GPU", "?");
+        final String tSkin = m.getOrDefault("TEMP_SKIN", "?");
+        final String tStat = m.getOrDefault("THERM_STATUS", "?");
+        final String bCap = m.getOrDefault("BATT_CAP", "?");
+        final String bTemp = m.getOrDefault("BATT_TEMP", "?");
+        final String bStat = m.getOrDefault("BATT_STAT", "?");
+        final String honorMode = m.getOrDefault("HONOR_MODE", "?");
+        final boolean launcherFront = "true".equalsIgnoreCase(m.getOrDefault("LAUNCHER_FRONT", "false"));
+
+        final String memUsed = m.getOrDefault("MEM_USED", "?");
+        final String memTot = m.getOrDefault("MEM_TOTAL", "?");
+        final String swpUsed = m.getOrDefault("SWAP_USED", "?");
+        final String swpTot = m.getOrDefault("SWAP_TOTAL", "?");
+        final String swappiness = m.getOrDefault("SWAPPINESS", "?");
+        final String loopRa = m.getOrDefault("LOOP_RA", "?");
+        final boolean vulkanOn = "1".equals(m.get("PERF_CHROMIUM_VULKAN"));
 
         ui.post(() -> {
             int okBg = Color.parseColor("#143322");
@@ -548,32 +891,107 @@ public class MainActivity extends Activity {
             int offFg = Color.parseColor("#F87171");
             int warnBg = Color.parseColor("#332914");
             int warnFg = Color.parseColor("#FBBF24");
+            int infoBg = Color.parseColor("#142838");
+            int infoFg = Color.parseColor("#7DCFFF");
 
-            setBadge(badgeRoot, fRoot ? "Granted" : "Tap to Grant Root", fRoot ? okFg : offFg, fRoot ? okBg : offBg);
-            setBadge(badgeMount, fMounted ? "Mounted" : "Unmounted", fMounted ? okFg : offFg, fMounted ? okBg : offBg);
-            setBadge(badgeX11, fX11 ? "Running" : "Stopped", fX11 ? okFg : offFg, fX11 ? okBg : offBg);
-            if (fDesktop && fPlank) {
+            // Update CPU & GPU live meters
+            boolean c0Capped = c0Max < (c0Hw - 100000);
+            boolean c3Capped = c3Max < (c3Hw - 100000);
+            boolean c6Capped = c6Max < (c6Hw - 100000);
+
+            updateMeter(meterCpu0,
+                    fmtGhz(c0Cur) + " / " + fmtGhz(c0Max) + " GHz" + (c0Capped ? " (cap<" + fmtGhz(c0Hw) + ")" : ""),
+                    (float) c0Cur / c0Hw,
+                    c0Capped ? COL_AMBER : COL_BLUE,
+                    c0Capped ? warnFg : Color.parseColor("#A9B1D6"));
+
+            updateMeter(meterCpu3,
+                    fmtGhz(c3Cur) + " / " + fmtGhz(c3Max) + " GHz" + (c3Capped ? " (cap<" + fmtGhz(c3Hw) + ")" : ""),
+                    (float) c3Cur / c3Hw,
+                    c3Capped ? COL_AMBER : COL_CYAN,
+                    c3Capped ? warnFg : Color.parseColor("#A9B1D6"));
+
+            updateMeter(meterCpu6,
+                    fmtGhz(c6Cur) + " / " + fmtGhz(c6Max) + " GHz" + (c6Capped ? " (cap<" + fmtGhz(c6Hw) + ")" : ""),
+                    (float) c6Cur / c6Hw,
+                    c6Capped ? COL_AMBER : COL_PURPLE,
+                    c6Capped ? warnFg : Color.parseColor("#A9B1D6"));
+
+            boolean gpuCapped = !"0".equals(gpuTherm);
+            updateMeter(meterGpu,
+                    gpuCur + " / " + gpuMax + " MHz · " + gpuBusy + "%",
+                    (float) gpuCur / gpuMax,
+                    gpuCapped ? COL_AMBER : COL_GREEN,
+                    gpuCapped ? warnFg : okFg);
+
+            tvGpuDetail.setText("KGSL: thermal_lvl=" + gpuTherm
+                    + " · wake=" + gpuWake + " MHz · idle=" + gpuIdle + " ms");
+
+            String thermLabel = "0".equals(tStat) ? "0 (Cool)"
+                    : "1".equals(tStat) ? "1 (Light)"
+                    : "2".equals(tStat) ? "2 (Mod)" : tStat;
+            tvThermalsLine.setText("CPU " + tCpu + "°C · GPU " + tGpu + "°C · Skin " + tSkin + "°C · Thm " + thermLabel);
+
+            String modeLabel = "4".equals(honorMode) ? "Performance"
+                    : "1".equals(honorMode) ? "Normal"
+                    : "3".equals(honorMode) ? "PowerSave" : honorMode;
+            tvPowerLine.setText("Battery " + bCap + "% (" + bTemp + "°C, " + bStat + ") · Honor: " + modeLabel);
+            tvMemLine.setText("RAM " + memUsed + "/" + memTot + " MB · ZRAM " + swpUsed + "/" + swpTot
+                    + " MB · swp=" + swappiness + " · RA=" + loopRa + "K");
+
+            tvLauncherWarn.setVisibility((launcherFront && (c0Capped || c6Capped)) ? View.VISIBLE : View.GONE);
+
+            // System badges
+            setBadge(badgeRoot, hasRoot ? "Granted" : "Tap to Grant in KSU", hasRoot ? okFg : offFg, hasRoot ? okBg : offBg);
+            setBadge(badgeMount, mounted ? "Mounted" : "Unmounted", mounted ? okFg : offFg, mounted ? okBg : offBg);
+            setBadge(badgeX11, x11 ? "Running" : "Stopped", x11 ? okFg : offFg, x11 ? okBg : offBg);
+
+            if (desktop && plank) {
                 setBadge(badgeDesktop, "Running", okFg, okBg);
-            } else if (fDesktop) {
+            } else if (desktop) {
                 setBadge(badgeDesktop, "XFCE only", warnFg, warnBg);
             } else {
                 setBadge(badgeDesktop, "Stopped", offFg, offBg);
             }
-            if (fVnc && fNovnc) {
+
+            if ("aaudio".equals(pulse)) {
+                setBadge(badgeAudio, "AAudio Live", okFg, okBg);
+            } else if ("null".equals(pulse)) {
+                setBadge(badgeAudio, "Null Sink", warnFg, warnBg);
+            } else {
+                setBadge(badgeAudio, "Stopped", offFg, offBg);
+            }
+
+            if (vnc && novnc) {
                 setBadge(badgeVnc, "VNC + Web", okFg, okBg);
-            } else if (fVnc || fNovnc) {
-                setBadge(badgeVnc, fVnc ? "VNC only" : "Web only", warnFg, warnBg);
+            } else if (vnc || novnc) {
+                setBadge(badgeVnc, vnc ? "VNC only" : "Web only", warnFg, warnBg);
             } else {
                 setBadge(badgeVnc, "Stopped", offFg, offBg);
             }
-            setBadge(badgeGpu, fGpu, Color.parseColor("#7DCFFF"), Color.parseColor("#142838"));
 
-            String host = TextUtils.isEmpty(fTs) ? "127.0.0.1" : fTs;
+            setBadge(badgeBrowserGpu, vulkanOn ? "Native Vulkan" : "Zink GL",
+                    vulkanOn ? infoFg : warnFg, vulkanOn ? infoBg : warnBg);
+
+            String host = TextUtils.isEmpty(ts) ? "127.0.0.1" : ts;
             tvNoVncUrl.setText("noVNC: http://" + host + ":6080/vnc.html");
-            tvVncAddr.setText("VNC:   " + host + ":5900" + (TextUtils.isEmpty(fTs) ? " (Tailscale offline)" : " (Tailscale)"));
-            tvDiskInfo.setText(TextUtils.isEmpty(fDisk)
+            tvVncAddr.setText("VNC:   " + host + ":5900" + (TextUtils.isEmpty(ts) ? " (Tailscale offline)" : " (Tailscale)"));
+            tvDiskInfo.setText(TextUtils.isEmpty(disk)
                     ? "Image: /data/adb/debian-gpu.img (unmounted)"
-                    : "Chroot disk: " + fDisk + "  ·  /data/adb/debian-gpu.img");
+                    : "Chroot disk: " + disk + " · /data/adb/debian-gpu.img");
+
+            // Sync toggle switches cleanly without re-triggering listeners
+            updatingSwitches = true;
+            try {
+                for (Map.Entry<String, Switch> e : toggleSwitches.entrySet()) {
+                    String v = m.get(e.getKey());
+                    if (v != null) {
+                        e.getValue().setChecked("1".equals(v));
+                    }
+                }
+            } finally {
+                updatingSwitches = false;
+            }
         });
     }
 }
