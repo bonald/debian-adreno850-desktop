@@ -1,6 +1,9 @@
 # Build and download caches
 work/
 build/
+android-app/build/
+*.keystore
+*.idsig
 *.tar.xz
 *.tar.zst
 *.img

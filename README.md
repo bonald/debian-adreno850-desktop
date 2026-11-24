@@ -36,6 +36,14 @@ Run a full native **Debian 13 (`trixie`, `arm64`)** glibc Linux desktop on a roo
 
 ```text
 .
+├── android-app/                        # Zero-Gradle Android manager app source (Java 11 + Android SDK)
+│   ├── AndroidManifest.xml
+│   ├── build.sh                        # Builds & signs DebianGPU.apk (~49 KB) via aapt2 + javac + d8
+│   ├── res/                            # Dark theme + macOS-style launcher icons
+│   └── src/com/debiangpu/manager/
+│       └── MainActivity.java           # Live status, Start/Stop/Unmount, VNC/noVNC, GPU verify & bench
+├── apk/
+│   └── DebianGPU.apk                   # Prebuilt signed Android manager APK (~49 KB)
 ├── assets/
 │   └── desktop-screenshot.png          # Live screenshot from Honor Magic9 Pro Max
 ├── config/
@@ -227,6 +235,39 @@ export DISPLAY="${DISPLAY:-:0}"
 Run [`scripts/setup-macos-desktop.sh`](scripts/setup-macos-desktop.sh) inside the chroot, copy [`scripts/debian-gpu.sh`](scripts/debian-gpu.sh) to `/data/adb/debian-gpu.sh`, and start with `su -c "/data/adb/debian-gpu.sh start"`.
 
 </details>
+
+---
+
+## Android Manager App (`Debian GPU`)
+
+Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the entire desktop from a lightweight (~49 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
+
+- **Live status dashboard:** Root (`su -M` global mount namespace), chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, TigerVNC + noVNC, and live KGSL GPU clock/utilization.
+- **One-tap controls:** Start Desktop (auto-opens Termux:X11), Open Display, Stop Desktop, Unmount Image.
+- **Remote X helpers:** Auto-detects your Tailscale IP with one-tap Copy noVNC, Copy VNC, Open Web, and a Change VNC Password dialog.
+- **Quick tools:** Launch Terminal on `DISPLAY=:0`, Verify GPU (`vulkaninfo` + `glxinfo`), and Run 720p `glmark2` Benchmark, with live console output.
+
+### Install the Prebuilt APK
+
+```bash
+adb install apk/DebianGPU.apk
+```
+
+*(Or copy [`apk/DebianGPU.apk`](apk/DebianGPU.apk) to your phone and install it directly.)*
+
+On first launch, grant Superuser access to **Debian GPU** in **KernelSU Manager** or **Magisk**, then tap **Refresh**.
+
+### Build the APK from Source (No Gradle Required)
+
+Requires JDK 11+, Android SDK (`build-tools` + `platforms`), and `zip`:
+
+```bash
+cd android-app
+./build.sh
+# Output: android-app/build/DebianGPU.apk
+```
+
+Pass `--regen-icons` (requires `python3-pil`) if you want to regenerate the `mipmap-*` launcher icons.
 
 ---
 
