@@ -80,30 +80,46 @@ get_loop_dev() {
 }
 
 # Lock a sysfs control node to a desired value by writing to the real kernel node first,
-# then bind-mounting a writable tmpfs sink (preserving SELinux context) so vendor daemons
+# then bind-mounting a writable sink file (preserving SELinux context) so vendor daemons
 # (iawareperf / perf2-hal / dubaid) succeed silently without re-clamping clocks or spinning.
 # Hardware CPUCP/LMh (scmi_limit_notify_cb) and TSENS (105-125C) stay 100% active underneath.
+GUARD_DIR=/data/local/tmp/.debian_gpu_guard
+
+is_mounted_path() {
+    local real
+    real=$(readlink -f "$1" 2>/dev/null || echo "$1")
+    grep -Fq " $real " /proc/self/mountinfo 2>/dev/null
+}
+
 guard_sysfs_node() {
     local target="$1" val="$2" name="$3"
-    local sink="/dev/.debian_gpu_guard/$name"
+    local real sink
     [ -e "$target" ] || return 0
-    mountpoint -q "$target" && umount "$target" 2>/dev/null || true
-    chmod 644 "$target" 2>/dev/null || true
-    (echo "$val" > "$target") 2>/dev/null || true
-    mkdir -p /dev/.debian_gpu_guard
+    real=$(readlink -f "$target" 2>/dev/null || echo "$target")
+    sink="$GUARD_DIR/$name"
+    while is_mounted_path "$real"; do
+        umount "$real" 2>/dev/null || break
+    done
+    chmod 644 "$real" 2>/dev/null || true
+    (echo "$val" > "$real") 2>/dev/null || true
+    mkdir -p "$GUARD_DIR"
     printf "%s\n" "$val" > "$sink"
     chmod 666 "$sink"
-    chcon --reference="$target" "$sink" 2>/dev/null || true
-    mount --bind "$sink" "$target" 2>/dev/null || true
+    chcon --reference="$real" "$sink" 2>/dev/null || true
+    mount --bind "$sink" "$real" 2>/dev/null || true
 }
 
 unguard_sysfs_node() {
     local target="$1" val="${2:-}"
+    local real
     [ -e "$target" ] || return 0
-    mountpoint -q "$target" && umount "$target" 2>/dev/null || true
+    real=$(readlink -f "$target" 2>/dev/null || echo "$target")
+    while is_mounted_path "$real"; do
+        umount "$real" 2>/dev/null || break
+    done
     if [ -n "$val" ]; then
-        chmod 644 "$target" 2>/dev/null || true
-        (echo "$val" > "$target") 2>/dev/null || true
+        chmod 644 "$real" 2>/dev/null || true
+        (echo "$val" > "$real") 2>/dev/null || true
     fi
 }
 
