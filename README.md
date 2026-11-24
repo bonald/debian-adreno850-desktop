@@ -13,8 +13,8 @@ Run a full native **Debian 13 (`trixie`, `arm64`)** glibc Linux desktop on a roo
   - Zero KGSL page faults in `dmesg`; SELinux remains `Enforcing`.
 - **Android audio bridge (YouTube & Linux apps):**
   - Auto-starts **Termux PulseAudio** (`module-aaudio-sink` + localhost TCP on `127.0.0.1:4713`) with `PULSE_SERVER=127.0.0.1` exported into Debian so browsers (Brave/Chromium) and desktop apps play real 48 kHz audio without stalling HTML5 `<video>`.
-- **Persistent CPU / GPU / Desktop performance tweaks:**
-  - Stored in `/data/adb/debian-gpu.conf` and re-applied automatically on start and on phone reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`: Adreno 850 max clock unlock (`1450 MHz`) & fast KGSL ramp-up (`+24%` FPS), Honor Performance Mode (`SmartModeStatus=4`) + `Termux:X11` background exemption, WALT CPU burst tuning, XFCE4 shadow removal + `XPresent` sync, and RAM/loop read-ahead tuning.
+- **Persistent CPU / GPU / Memory performance tweaks:**
+  - Stored in `/data/adb/debian-gpu.conf` and re-applied automatically on start and on phone reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`: Adreno 850 max clock unlock (`1450 MHz`) & fast KGSL ramp-up (`+24%` FPS), Honor Performance Mode (`SmartModeStatus=4`) + `Termux:X11` background exemption, WALT CPU burst tuning, **tuned `jemalloc 5.3` (`3.7×` faster multi-threaded allocations than `glibc`)**, **THP `defer+madvise` + ARM64 64 KB CONT-PTE** (eliminates synchronous compaction stutters), XFCE4 shadow removal + `XPresent` sync, and RAM/loop read-ahead tuning.
 - **macOS-style dark desktop (XFCE4 + Plank)**:
   - Slim translucent dark top bar (Debian Whisker Menu + active window menu on left; live GPU/CPU/RAM badge, systray, and clock on right).
   - Centered frosted-glass floating dock (**Plank**) with 145% hover zoom, running-app dots, and a 9-dot App Grid launcher.
@@ -35,6 +35,7 @@ Run a full native **Debian 13 (`trixie`, `arm64`)** glibc Linux desktop on a roo
 | **Native Turnip + Zink on Termux:X11 (on-screen)** | `Adreno (TM) 850` / GL 4.6 | `texture` **77**, `phong` **64**, `build` **62**, `terrain` **49** | **62** |
 | **Brave WebGL2 shader (Native Vulkan vs Zink)** | `ANGLE Vulkan 1.4 (Turnip)` | **159.6 FPS** vs 123.9 FPS Zink (**+29%**) | — |
 | **KGSL Fast Ramp (`default_pwrlevel` + `idle_timer`)** | `Adreno (TM) 850` / `glmark2` | `phong` **166 FPS** vs 134 FPS stock (**+24%**) | **165** |
+| **Multi-threaded Allocator (6 threads)** | `jemalloc 5.3` (tuned) vs `glibc` / `mimalloc 3.0` | **33.5 ms** vs 122.7 ms `glibc` (**3.7×**) / 45.3 ms `mimalloc` | — |
 | VM `virgl` TCP bridge (for comparison) | `virgl (Adreno 850)` / GL 3.3 | `terrain` 29, `refract` 24 | 25 |
 | VM software `llvmpipe` (for comparison) | CPU | `terrain` 10 | 9 |
 
@@ -252,9 +253,9 @@ Run [`scripts/setup-macos-desktop.sh`](scripts/setup-macos-desktop.sh) inside th
 
 ---
 
-## Android Manager App (`Debian GPU v2.0`)
+## Android Manager App (`Debian GPU v2.1`)
 
-Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, audio bridge, and performance tweaks from a lightweight (~58 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
+Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, audio bridge, and performance tweaks from a lightweight (~59 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
 
 <p align="center">
   <img src="assets/apk-v2-screenshot.png" alt="Debian GPU v2.0 Android Manager with live CPU/GPU telemetry and persistent toggles" width="340" />
@@ -265,12 +266,14 @@ Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can mana
   - Live KGSL state (`thermal_lvl`, wake clock, `idle_timer`), live HAL **CPU / GPU / Skin temps**, Android thermal status, battery/charging state, Honor power mode, **RAM / ZRAM / swappiness / loop read-ahead**, plus a warning banner when Honor Launcher is capping CPU clocks. *(Tip: leaving Debian GPU open on the phone screen while docked prevents Honor's home-screen CPU cap.)*
 - **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), and **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**.
 - **One-tap Desktop & Audio Controls:** Start Desktop (auto-opens Termux:X11), Open Display, Stop Desktop, Unmount Image, **Apply Perf Now**, and **Fix Audio Sink** (repairs `AAudio_sink` and routes active streams).
-- **11 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
+- **13 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
   - Honor Performance Mode (`SmartModeStatus=4` + `Termux:X11` background exemption)
   - Unlock Adreno 850 Max Clock (`thermal_pwrlevel=0`, 1450 MHz)
   - GPU Fast Ramp (`951 MHz` wake + `500 ms` idle timer, +24% FPS) & GPU Max Wake (`1450 MHz` docked)
   - Unlock CPU Max Clocks (`3.74 / 4.03 / 5.01 GHz`) & WALT Burst Tuning (`hispeed_load=70`, `pl=1`)
   - RAM & Chroot Disk I/O (`swappiness=20`, `vfs_cache_pressure=50`, loop `read_ahead_kb=512`)
+  - **THP Defrag Fix (`defer+madvise`, 2 MB `madvise`, ARM64 64 KB CONT-PTE `always`)**
+  - **Tuned `jemalloc 5.3` Allocator** (`3.7×` faster for desktop/Mesa/shells; safely excluded from Chromium PartitionAlloc)
   - XFCE4 No Shadows + `XPresent` sync
   - Native Vulkan (`GaneshVulkan` + `ANGLE Vulkan`, +29% WebGL) for Brave & Electron apps
   - PulseAudio Bridge (`AAudio :4713`) & Auto-Apply on Reboot (`service.d`)

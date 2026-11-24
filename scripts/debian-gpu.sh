@@ -39,6 +39,8 @@ PERF_GPU_MAX_WAKE=0
 PERF_CPU_UNLOCK=1
 PERF_WALT_BURST=1
 PERF_VM_IO=1
+PERF_THP_OPT=1
+PERF_JEMALLOC=1
 PERF_XFCE_OPT=1
 PERF_CHROMIUM_VULKAN=1
 PERF_PULSEAUDIO=1
@@ -56,6 +58,8 @@ load_conf() {
     PERF_CPU_UNLOCK=1
     PERF_WALT_BURST=1
     PERF_VM_IO=1
+    PERF_THP_OPT=1
+    PERF_JEMALLOC=1
     PERF_XFCE_OPT=1
     PERF_CHROMIUM_VULKAN=1
     PERF_PULSEAUDIO=1
@@ -144,6 +148,31 @@ export CHROMIUM_GPU_FLAGS="--ignore-gpu-blocklist --enable-gpu-rasterization"
 EOF
     fi
     chmod 644 "$FLAG_FILE"
+}
+
+apply_allocator_opt() {
+    load_conf
+    mountpoint -q "$MNT" || return 0
+    ALLOC_FILE="$MNT/etc/profile.d/allocator-opt.sh"
+    if [ "$PERF_JEMALLOC" = "1" ]; then
+        cat > "$ALLOC_FILE" <<'EOF'
+# Managed by /data/adb/debian-gpu.sh (PERF_JEMALLOC=1)
+# Tuned jemalloc 5.3 (~3.7x faster multi-thread alloc vs glibc ptmalloc2).
+# Chromium/Electron wrappers explicitly reset LD_PRELOAD so PartitionAlloc stays untouched.
+if [ -r /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
+    export MALLOC_CONF="${MALLOC_CONF:-background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000,metadata_thp:auto}"
+    case ":${LD_PRELOAD:-}:" in
+        *:/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:*) ;;
+        *) export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+    esac
+fi
+EOF
+    else
+        cat > "$ALLOC_FILE" <<'EOF'
+# Managed by /data/adb/debian-gpu.sh (PERF_JEMALLOC=0 - stock glibc ptmalloc2)
+EOF
+    fi
+    chmod 644 "$ALLOC_FILE"
 }
 
 apply_xfce_tweaks() {
@@ -253,8 +282,27 @@ apply_perf_tweaks() {
         [ -n "$LDEV" ] && (echo 128 > "/sys/block/$LDEV/queue/read_ahead_kb") 2>/dev/null || true
     fi
 
-    # 7. Sync chroot configs & boot persistence
+    # 7. Transparent Huge Pages defrag stutter fix (keep ARM64 64KB CONT-PTE always)
+    if [ -d /sys/kernel/mm/transparent_hugepage ]; then
+        if [ "$PERF_THP_OPT" = "1" ]; then
+            (echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag) 2>/dev/null || true
+            (echo madvise > /sys/kernel/mm/transparent_hugepage/enabled) 2>/dev/null || true
+            for sz in 128kB 256kB 512kB 1024kB 2048kB; do
+                (echo madvise > "/sys/kernel/mm/transparent_hugepage/hugepages-$sz/enabled") 2>/dev/null || true
+            done
+            (echo always > /sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled) 2>/dev/null || true
+        else
+            (echo always > /sys/kernel/mm/transparent_hugepage/defrag) 2>/dev/null || true
+            (echo always > /sys/kernel/mm/transparent_hugepage/enabled) 2>/dev/null || true
+            for sz in 64kB 128kB 256kB 512kB 1024kB 2048kB; do
+                (echo always > "/sys/kernel/mm/transparent_hugepage/hugepages-$sz/enabled") 2>/dev/null || true
+            done
+        fi
+    fi
+
+    # 8. Sync chroot configs & boot persistence
     apply_chromium_flags
+    apply_allocator_opt
     apply_xfce_tweaks
     sync_boot_script
 }
@@ -294,7 +342,7 @@ do_set_toggle() {
     KEY="${1:-}"
     VAL="${2:-}"
     case "$KEY" in
-        PERF_HONOR_MODE|PERF_GPU_UNLOCK|PERF_GPU_RAMP|PERF_GPU_MAX_WAKE|PERF_CPU_UNLOCK|PERF_WALT_BURST|PERF_VM_IO|PERF_XFCE_OPT|PERF_CHROMIUM_VULKAN|PERF_PULSEAUDIO|PERF_BOOT_PERSIST)
+        PERF_HONOR_MODE|PERF_GPU_UNLOCK|PERF_GPU_RAMP|PERF_GPU_MAX_WAKE|PERF_CPU_UNLOCK|PERF_WALT_BURST|PERF_VM_IO|PERF_THP_OPT|PERF_JEMALLOC|PERF_XFCE_OPT|PERF_CHROMIUM_VULKAN|PERF_PULSEAUDIO|PERF_BOOT_PERSIST)
             ;;
         *)
             echo "Unknown toggle key: $KEY" >&2
@@ -348,6 +396,8 @@ PERF_GPU_MAX_WAKE=0
 PERF_CPU_UNLOCK=0
 PERF_WALT_BURST=0
 PERF_VM_IO=0
+PERF_THP_OPT=0
+PERF_JEMALLOC=0
 PERF_XFCE_OPT=0
 PERF_CHROMIUM_VULKAN=0
 PERF_PULSEAUDIO=1
@@ -459,6 +509,7 @@ do_start() {
             export QT_X11_NO_MITSHM=1
             export GTK_THEME=Adwaita:dark
             export QT_QPA_PLATFORMTHEME=gtk3
+            . /etc/profile.d/allocator-opt.sh 2>/dev/null || true
             nohup dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 </dev/null &
         "
     '
@@ -575,11 +626,12 @@ do_telemetry() {
     echo "HONOR_MODE=$(settings get system SmartModeStatus 2>/dev/null || echo '?')"
     echo "LAUNCHER_FRONT=$(dumpsys powergenius ScenarioService 2>/dev/null | awk '/mIsLauncherFront/{print $3; exit}' || echo 'false')"
 
-    # Memory / Swap / I/O
+    # Memory / Swap / I/O / THP
     awk '/^MemTotal:/{mt=$2} /^MemAvailable:/{ma=$2} /^SwapTotal:/{st=$2} /^SwapFree:/{sf=$2} END{printf "MEM_USED=%d\nMEM_TOTAL=%d\nSWAP_USED=%d\nSWAP_TOTAL=%d\n", (mt-ma)/1024, mt/1024, (st-sf)/1024, st/1024}' /proc/meminfo 2>/dev/null || true
     echo "SWAPPINESS=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo '?')"
     LDEV=$(get_loop_dev || true)
     echo "LOOP_RA=$([ -n "$LDEV" ] && cat "/sys/block/$LDEV/queue/read_ahead_kb" 2>/dev/null || echo '?')"
+    echo "THP_DEFRAG=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || echo '?')"
 
     # Toggles from persistent config
     echo "PERF_HONOR_MODE=$PERF_HONOR_MODE"
@@ -589,6 +641,8 @@ do_telemetry() {
     echo "PERF_CPU_UNLOCK=$PERF_CPU_UNLOCK"
     echo "PERF_WALT_BURST=$PERF_WALT_BURST"
     echo "PERF_VM_IO=$PERF_VM_IO"
+    echo "PERF_THP_OPT=$PERF_THP_OPT"
+    echo "PERF_JEMALLOC=$PERF_JEMALLOC"
     echo "PERF_XFCE_OPT=$PERF_XFCE_OPT"
     echo "PERF_CHROMIUM_VULKAN=$PERF_CHROMIUM_VULKAN"
     echo "PERF_PULSEAUDIO=$PERF_PULSEAUDIO"

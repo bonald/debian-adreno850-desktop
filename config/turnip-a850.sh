@@ -24,3 +24,6 @@ export DISPLAY="${DISPLAY:-:0}"
 
 # Termux PulseAudio TCP bridge (AAudio_sink on 127.0.0.1:4713)
 export PULSE_SERVER="${PULSE_SERVER:-127.0.0.1}"
+
+# Optional tuned jemalloc 5.3 allocator (managed by /data/adb/debian-gpu.sh PERF_JEMALLOC)
+[ -r /etc/profile.d/allocator-opt.sh ] && . /etc/profile.d/allocator-opt.sh

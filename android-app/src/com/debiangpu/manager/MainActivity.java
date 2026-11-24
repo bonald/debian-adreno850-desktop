@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     private TextView tvGpuDetail, tvThermalsLine, tvPowerLine, tvMemLine, tvLauncherWarn;
 
     // System status badges
-    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeAudio, badgeVnc, badgeBrowserGpu;
+    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator;
     private TextView tvNoVncUrl, tvVncAddr, tvDiskInfo, tvConsole, tvBusyStatus;
     private ScrollView consoleScroll;
 
@@ -187,7 +187,7 @@ public class MainActivity extends Activity {
         titleLine.addView(title);
 
         TextView verPill = new TextView(this);
-        verPill.setText("v2.0");
+        verPill.setText("v2.1");
         verPill.setTextColor(Color.parseColor("#7DCFFF"));
         verPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         verPill.setTypeface(Typeface.DEFAULT_BOLD);
@@ -259,6 +259,7 @@ public class MainActivity extends Activity {
         badgeAudio = addStatusRow(statusCard, "PulseAudio (AAudio :4713)");
         badgeVnc = addStatusRow(statusCard, "Remote X (VNC + noVNC)");
         badgeBrowserGpu = addStatusRow(statusCard, "Brave / Electron GPU");
+        badgeAllocator = addStatusRow(statusCard, "Desktop Allocator");
 
         tvDiskInfo = makeInfoLine(statusCard, "Image: /data/adb/debian-gpu.img", COL_MUTED, 11, false);
         root.addView(statusCard);
@@ -319,6 +320,10 @@ public class MainActivity extends Activity {
                 "hispeed_load=70, predictive load (pl=1), higher hispeed freqs (2.19/2.65/3.57 GHz)");
         addToggleRow(perfCard, "PERF_VM_IO", "RAM & Chroot Disk I/O Tuning",
                 "vm.swappiness=20, vfs_cache_pressure=50, loop read-ahead 512 KB");
+        addToggleRow(perfCard, "PERF_THP_OPT", "THP Defrag Fix (ARM64 64K)",
+                "defrag=defer+madvise, 2MB=madvise, 64KB CONT-PTE=always (no compaction stalls)");
+        addToggleRow(perfCard, "PERF_JEMALLOC", "jemalloc 5.3 Allocator (3.7x Faster)",
+                "Tuned jemalloc for XFCE/Mesa/shells (auto-excluded from Chromium PartitionAlloc)");
         addToggleRow(perfCard, "PERF_XFCE_OPT", "XFCE4 No Shadows + XPresent",
                 "Disables CPU XRender frame/popup shadows & enables smooth XPresent sync");
         addToggleRow(perfCard, "PERF_CHROMIUM_VULKAN", "Native Vulkan (Brave / Electron)",
@@ -882,7 +887,9 @@ public class MainActivity extends Activity {
         final String swpTot = m.getOrDefault("SWAP_TOTAL", "?");
         final String swappiness = m.getOrDefault("SWAPPINESS", "?");
         final String loopRa = m.getOrDefault("LOOP_RA", "?");
+        final String thpDefrag = m.getOrDefault("THP_DEFRAG", "?");
         final boolean vulkanOn = "1".equals(m.get("PERF_CHROMIUM_VULKAN"));
+        final boolean jemallocOn = "1".equals(m.get("PERF_JEMALLOC"));
 
         ui.post(() -> {
             int okBg = Color.parseColor("#143322");
@@ -937,7 +944,7 @@ public class MainActivity extends Activity {
                     : "3".equals(honorMode) ? "PowerSave" : honorMode;
             tvPowerLine.setText("Battery " + bCap + "% (" + bTemp + "°C, " + bStat + ") · Honor: " + modeLabel);
             tvMemLine.setText("RAM " + memUsed + "/" + memTot + " MB · ZRAM " + swpUsed + "/" + swpTot
-                    + " MB · swp=" + swappiness + " · RA=" + loopRa + "K");
+                    + " MB · swp=" + swappiness + " · RA=" + loopRa + "K · THP=" + thpDefrag);
 
             tvLauncherWarn.setVisibility((launcherFront && (c0Capped || c6Capped)) ? View.VISIBLE : View.GONE);
 
@@ -972,6 +979,8 @@ public class MainActivity extends Activity {
 
             setBadge(badgeBrowserGpu, vulkanOn ? "Native Vulkan" : "Zink GL",
                     vulkanOn ? infoFg : warnFg, vulkanOn ? infoBg : warnBg);
+            setBadge(badgeAllocator, jemallocOn ? "jemalloc 5.3" : "glibc",
+                    jemallocOn ? okFg : COL_MUTED, jemallocOn ? okBg : COL_SURFACE_BTN);
 
             String host = TextUtils.isEmpty(ts) ? "127.0.0.1" : ts;
             tvNoVncUrl.setText("noVNC: http://" + host + ":6080/vnc.html");
