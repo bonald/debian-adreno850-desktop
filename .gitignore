@@ -1,0 +1,8 @@
+# Build and download caches
+work/
+build/
+*.tar.xz
+*.tar.zst
+*.img
+*.log
+.DS_Store
