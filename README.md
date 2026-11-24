@@ -7,9 +7,14 @@ Run a full native **Debian 13 (`trixie`, `arm64`)** glibc Linux desktop on a roo
 ## What You Get
 
 - **Bare-metal Adreno 850 GPU acceleration** directly on `/dev/kgsl-3d0`:
-  - **Vulkan 1.4** via a 1-line upstream patch to **Mesa 26.3.1 Turnip** (`chip_id=0x44051431`, KGSL `gen8_14_0`), compiled natively for glibc inside Debian and installed to `/opt/turnip-a850`.
+  - **Vulkan 1.4** via upstream-patched **Mesa Turnip** (`chip_id=0x44051431`, KGSL `gen8_14_0`), compiled natively for glibc inside Debian and installed to `/opt/turnip-a850`.
   - **OpenGL 4.6 (Core & Compatibility)** via **Mesa Zink** running over Turnip.
+  - **Native Vulkan for Brave & Electron apps** (`Skia GaneshVulkan` + `ANGLE Vulkan 1.4` directly on Turnip, bypassing Zink for **+29%** WebGL FPS).
   - Zero KGSL page faults in `dmesg`; SELinux remains `Enforcing`.
+- **Android audio bridge (YouTube & Linux apps):**
+  - Auto-starts **Termux PulseAudio** (`module-aaudio-sink` + localhost TCP on `127.0.0.1:4713`) with `PULSE_SERVER=127.0.0.1` exported into Debian so browsers (Brave/Chromium) and desktop apps play real 48 kHz audio without stalling HTML5 `<video>`.
+- **Persistent CPU / GPU / Desktop performance tweaks:**
+  - Stored in `/data/adb/debian-gpu.conf` and re-applied automatically on start and on phone reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`: Adreno 850 max clock unlock (`1450 MHz`) & fast KGSL ramp-up (`+24%` FPS), Honor Performance Mode (`SmartModeStatus=4`) + `Termux:X11` background exemption, WALT CPU burst tuning, XFCE4 shadow removal + `XPresent` sync, and RAM/loop read-ahead tuning.
 - **macOS-style dark desktop (XFCE4 + Plank)**:
   - Slim translucent dark top bar (Debian Whisker Menu + active window menu on left; live GPU/CPU/RAM badge, systray, and clock on right).
   - Centered frosted-glass floating dock (**Plank**) with 145% hover zoom, running-app dots, and a 9-dot App Grid launcher.
@@ -28,6 +33,8 @@ Run a full native **Debian 13 (`trixie`, `arm64`)** glibc Linux desktop on a roo
 | **Debian 13 chroot Turnip + Zink (offscreen)** | `Adreno (TM) 850` / GL 4.6 | `build` **964**, `phong` **743**, `texture` **724**, `terrain` **88** | **628** |
 | **Native Turnip on Termux:X11 (on-screen)** | `Adreno (TM) 850` / Vulkan 1.4 | `cube` **118**, `vertex` **109**, `phong` **100** (~120 Hz cap) | **109** |
 | **Native Turnip + Zink on Termux:X11 (on-screen)** | `Adreno (TM) 850` / GL 4.6 | `texture` **77**, `phong` **64**, `build` **62**, `terrain` **49** | **62** |
+| **Brave WebGL2 shader (Native Vulkan vs Zink)** | `ANGLE Vulkan 1.4 (Turnip)` | **159.6 FPS** vs 123.9 FPS Zink (**+29%**) | — |
+| **KGSL Fast Ramp (`default_pwrlevel` + `idle_timer`)** | `Adreno (TM) 850` / `glmark2` | `phong` **166 FPS** vs 134 FPS stock (**+24%**) | **165** |
 | VM `virgl` TCP bridge (for comparison) | `virgl (Adreno 850)` / GL 3.3 | `terrain` 29, `refract` 24 | 25 |
 | VM software `llvmpipe` (for comparison) | CPU | `terrain` 10 | 9 |
 
@@ -38,28 +45,29 @@ Run a full native **Debian 13 (`trixie`, `arm64`)** glibc Linux desktop on a roo
 ```text
 .
 ├── android-app/                        # Zero-Gradle Android manager app source (Java 11 + Android SDK)
-│   ├── AndroidManifest.xml
-│   ├── build.sh                        # Builds & signs DebianGPU.apk (~49 KB) via aapt2 + javac + d8
+│   ├── AndroidManifest.xml             # v2.0.0 (com.debiangpu.manager)
+│   ├── build.sh                        # Builds & signs DebianGPU.apk (~58 KB) via aapt2 + javac + d8
 │   ├── res/                            # Dark theme + macOS-style launcher icons
 │   └── src/com/debiangpu/manager/
-│       └── MainActivity.java           # Live status, Start/Stop/Unmount, VNC/noVNC, GPU verify & bench
+│       └── MainActivity.java           # Live CPU/GPU/thermal telemetry, 11 persistent toggles, audio & VNC controls
 ├── apk/
-│   └── DebianGPU.apk                   # Prebuilt signed Android manager APK (~49 KB)
+│   └── DebianGPU.apk                   # Prebuilt signed Android manager APK v2.0 (~58 KB)
 ├── assets/
-│   └── desktop-screenshot.png          # Live screenshot from Honor Magic9 Pro Max
+│   ├── desktop-screenshot.png          # Live desktop screenshot from Honor Magic9 Pro Max
+│   └── apk-v2-screenshot.png           # Live Debian GPU v2.0 Android manager screenshot
 ├── config/
-│   └── turnip-a850.sh                  # /etc/profile.d/turnip-a850.sh GPU environment profile
+│   └── turnip-a850.sh                  # /etc/profile.d/turnip-a850.sh GPU + PulseAudio environment profile
 ├── docs/
 │   └── architecture-and-troubleshooting.md
 ├── patches/
 │   └── mesa-26.3.1-adreno-850.patch    # 1-line Mesa 26.3.1 Adreno 850 (0x44051431) KGSL patch
 └── scripts/
-    ├── setup-termux.sh                 # Step 0: Termux packages (termux-x11, socat, zstd)
+    ├── setup-termux.sh                 # Step 0: Termux packages (termux-x11, pulseaudio, socat, zstd)
     ├── 01-prepare-host.sh              # Step 1: Download Debian 13 + Mesa, patch, push via ADB
     ├── 02-bootstrap-chroot.sh          # Step 2: Create ext4 image, extract, mount, trigger build
     ├── 03-install-and-build-chroot.sh  # Step 3: Install XFCE4/Plank/VNC, build glibc Turnip
     ├── setup-macos-desktop.sh          # Generates wallpaper, traffic-light xfwm4 theme, Plank dock
-    ├── debian-gpu.sh                   # Installed to /data/adb/debian-gpu.sh (daily manager)
+    ├── debian-gpu.sh                   # Installed to /data/adb/debian-gpu.sh (daily manager + perf/audio/telemetry)
     └── verify-gpu.sh                   # Verifies Vulkan 1.4, OpenGL 4.6, CPU, optional glmark2
 ```
 
@@ -85,7 +93,7 @@ Open **Termux** on your phone (normal non-root session) and run:
 ```bash
 pkg update -y && pkg upgrade -y
 pkg install -y x11-repo
-pkg install -y termux-x11-nightly socat zstd
+pkg install -y termux-x11-nightly pulseaudio socat zstd
 mkdir -p "$PREFIX/tmp/.X11-unix"
 ```
 
@@ -231,7 +239,10 @@ export QT_X11_NO_MITSHM=1
 export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
 export QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-gtk3}"
 export DISPLAY="${DISPLAY:-:0}"
+export PULSE_SERVER="${PULSE_SERVER:-127.0.0.1}"
 ```
+
+For Chromium/Electron wrappers (Brave, VS Code, Vesktop, Signal, T3 Code), `/data/adb/debian-gpu.sh` also manages `/etc/profile.d/chromium-gpu-flags.sh` (`--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --enable-features=Vulkan --use-gl=angle --use-angle=vulkan`) when `PERF_CHROMIUM_VULKAN=1`.
 
 ### 7. Apply the macOS-style XFCE4 + Plank configuration and install `/data/adb/debian-gpu.sh`
 
@@ -241,14 +252,29 @@ Run [`scripts/setup-macos-desktop.sh`](scripts/setup-macos-desktop.sh) inside th
 
 ---
 
-## Android Manager App (`Debian GPU`)
+## Android Manager App (`Debian GPU v2.0`)
 
-Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the entire desktop from a lightweight (~49 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
+Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, audio bridge, and performance tweaks from a lightweight (~58 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
 
-- **Live status dashboard:** Root (`su -M` global mount namespace), chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, TigerVNC + noVNC, and live KGSL GPU clock/utilization.
-- **One-tap controls:** Start Desktop (auto-opens Termux:X11), Open Display, Stop Desktop, Unmount Image.
-- **Remote X helpers:** Auto-detects your Tailscale IP with one-tap Copy noVNC, Copy VNC, Open Web, and a Change VNC Password dialog.
-- **Quick tools:** Launch Terminal on `DISPLAY=:0`, Verify GPU (`vulkaninfo` + `glxinfo`), and Run 720p `glmark2` Benchmark, with live console output.
+<p align="center">
+  <img src="assets/apk-v2-screenshot.png" alt="Debian GPU v2.0 Android Manager with live CPU/GPU telemetry and persistent toggles" width="340" />
+</p>
+
+- **Live CPU / GPU / Thermal Telemetry (auto-refreshes every 2.5s, toggleable `Live` / `Paused`):**
+  - Real-time frequency meters for **CPU Little (0–2)**, **CPU Big (3–5)**, **CPU Prime (6–7)** (highlighted amber whenever capped below hardware max), and **Adreno 850 GPU** (`MHz / 1450 MHz · busy%`).
+  - Live KGSL state (`thermal_lvl`, wake clock, `idle_timer`), live HAL **CPU / GPU / Skin temps**, Android thermal status, battery/charging state, Honor power mode, **RAM / ZRAM / swappiness / loop read-ahead**, plus a warning banner when Honor Launcher is capping CPU clocks. *(Tip: leaving Debian GPU open on the phone screen while docked prevents Honor's home-screen CPU cap.)*
+- **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), and **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**.
+- **One-tap Desktop & Audio Controls:** Start Desktop (auto-opens Termux:X11), Open Display, Stop Desktop, Unmount Image, **Apply Perf Now**, and **Fix Audio Sink** (repairs `AAudio_sink` and routes active streams).
+- **11 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
+  - Honor Performance Mode (`SmartModeStatus=4` + `Termux:X11` background exemption)
+  - Unlock Adreno 850 Max Clock (`thermal_pwrlevel=0`, 1450 MHz)
+  - GPU Fast Ramp (`951 MHz` wake + `500 ms` idle timer, +24% FPS) & GPU Max Wake (`1450 MHz` docked)
+  - Unlock CPU Max Clocks (`3.74 / 4.03 / 5.01 GHz`) & WALT Burst Tuning (`hispeed_load=70`, `pl=1`)
+  - RAM & Chroot Disk I/O (`swappiness=20`, `vfs_cache_pressure=50`, loop `read_ahead_kb=512`)
+  - XFCE4 No Shadows + `XPresent` sync
+  - Native Vulkan (`GaneshVulkan` + `ANGLE Vulkan`, +29% WebGL) for Brave & Electron apps
+  - PulseAudio Bridge (`AAudio :4713`) & Auto-Apply on Reboot (`service.d`)
+- **Remote X & Quick Tools:** Auto-detects your Tailscale IP (Copy noVNC, Copy VNC, Open Web, Change VNC Password), Launch Terminal, **Launch Brave**, Verify GPU (`vulkaninfo` + `glxinfo`), **Restart VNC**, Fix AVF Terminal Audio, and a clearable Console Output view.
 
 ### Install the Prebuilt APK
 
@@ -279,16 +305,25 @@ Pass `--regen-icons` (requires `python3-pil`) if you want to regenerate the `mip
 ### Host Manager Commands (`/data/adb/debian-gpu.sh`)
 
 ```sh
-su -c "/data/adb/debian-gpu.sh start"         # Mount chroot, launch Termux:X11, XFCE4 + Plank, VNC & noVNC
-su -c "/data/adb/debian-gpu.sh status"        # Check service status and print Tailscale VNC / noVNC URLs
-su -c "/data/adb/debian-gpu.sh shell"         # Open interactive Debian shell as user 'droid'
-su -c "/data/adb/debian-gpu.sh verify"        # Verify Vulkan 1.4, OpenGL 4.6, and CPU info
-su -c "/data/adb/debian-gpu.sh verify --bench" # Also run 720p glmark2 offscreen benchmark
-su -c "/data/adb/debian-gpu.sh vnc"           # Restart VNC/noVNC & Tailscale proxy without closing apps
-su -c "/data/adb/debian-gpu.sh passwd"        # Change VNC password and restart VNC
-su -c "/data/adb/debian-gpu.sh stop"          # Stop desktop, VNC, and noVNC
-su -c "/data/adb/debian-gpu.sh umount"        # Stop everything and cleanly unmount the ext4 image
+su -c "/data/adb/debian-gpu.sh start"                # Apply perf tweaks, mount chroot, start X11, PulseAudio, XFCE4+Plank & VNC
+su -c "/data/adb/debian-gpu.sh status"               # Check service status and print Tailscale VNC / noVNC URLs
+su -c "/data/adb/debian-gpu.sh perf"                 # Re-apply all enabled tweaks from /data/adb/debian-gpu.conf
+su -c "/data/adb/debian-gpu.sh set-toggle KEY 0|1"   # Persist and live-apply one toggle (e.g. PERF_CHROMIUM_VULKAN 1)
+su -c "/data/adb/debian-gpu.sh reset-perf"           # Restore stock defaults for all perf toggles
+su -c "/data/adb/debian-gpu.sh audio-fix"            # Start/repair Termux PulseAudio AAudio_sink and move active streams
+su -c "/data/adb/debian-gpu.sh audio-stop"           # Stop Termux PulseAudio daemon
+su -c "/data/adb/debian-gpu.sh telemetry"            # Print machine-readable live CPU/GPU/thermal/service telemetry
+su -c "/data/adb/debian-gpu.sh shell"                # Open interactive Debian shell as user 'droid'
+su -c "/data/adb/debian-gpu.sh vnc"                  # Restart VNC/noVNC & Tailscale proxy without closing apps
+su -c "/data/adb/debian-gpu.sh passwd"               # Change VNC password and restart VNC
+su -c "/data/adb/debian-gpu.sh stop"                 # Stop desktop, VNC, and noVNC
+su -c "/data/adb/debian-gpu.sh umount"               # Stop everything and cleanly unmount the ext4 image
 ```
+
+#### Persistent Config & Boot Hook
+
+- **Config file:** `/data/adb/debian-gpu.conf` stores all `PERF_*` toggle states (`0` or `1`).
+- **Reboot persistence:** When `PERF_BOOT_PERSIST=1`, `debian-gpu.sh` installs `/data/adb/service.d/99-debian-gpu-perf.sh` so KernelSU automatically re-applies your enabled sysfs/KGSL/WALT/VM tweaks after Android finishes booting.
 
 ### Keyboard Shortcuts & Dock
 
