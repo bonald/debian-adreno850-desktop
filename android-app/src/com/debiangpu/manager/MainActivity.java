@@ -187,7 +187,7 @@ public class MainActivity extends Activity {
         titleLine.addView(title);
 
         TextView verPill = new TextView(this);
-        verPill.setText("v2.2");
+        verPill.setText("v2.3");
         verPill.setTextColor(Color.parseColor("#7DCFFF"));
         verPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         verPill.setTypeface(Typeface.DEFAULT_BOLD);
@@ -320,6 +320,8 @@ public class MainActivity extends Activity {
                 "Pauses dubaid & skin cooling_switch (keeps iawareperf UI boost & HW 105°C LMh safe)");
         addToggleRow(perfCard, "PERF_WALT_BURST", "WALT CPU Burst Tuning",
                 "hispeed_load=70, predictive load (pl=1), higher hispeed freqs (2.19/2.65/3.57 GHz)");
+        addToggleRow(perfCard, "PERF_WALT_PRIME_BIAS", "WALT Prime-Bias (5.01 GHz Migrate)",
+                "Lowers cluster0/1 upmigrate (95->40/45%) + asymcap_boost for faster 1C/UI bursts");
         addToggleRow(perfCard, "PERF_VM_IO", "RAM & Chroot Disk I/O Tuning",
                 "vm.swappiness=20, vfs_cache_pressure=50, loop read-ahead 512 KB");
         addToggleRow(perfCard, "PERF_THP_OPT", "THP Defrag Fix (ARM64 64K)",

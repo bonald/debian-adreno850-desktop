@@ -253,7 +253,7 @@ Run [`scripts/setup-macos-desktop.sh`](scripts/setup-macos-desktop.sh) inside th
 
 ---
 
-## Android Manager App (`Debian GPU v2.2`)
+## Android Manager App (`Debian GPU v2.3`)
 
 Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, audio bridge, and performance tweaks from a lightweight (~60 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
 
@@ -266,13 +266,13 @@ Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can mana
   - Live KGSL state (`thermal_lvl`, wake clock, `idle_timer`), live HAL **CPU / GPU / Skin temps**, Android thermal status, battery/charging state, Honor power mode, **RAM / ZRAM / swappiness / loop read-ahead**, plus a warning banner when Honor Launcher is capping CPU clocks. *(Tip: leaving Debian GPU open on the phone screen while docked prevents Honor's home-screen CPU cap.)*
 - **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), and **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**.
 - **One-tap Desktop & Audio Controls:** Start Desktop (auto-opens Termux:X11), Open Display, Stop Desktop, Unmount Image, **Apply Perf Now**, and **Fix Audio Sink** (repairs `AAudio_sink` and routes active streams).
-- **14 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
+- **15 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
   - Honor Performance Mode (`SmartModeStatus=4` + `Termux:X11` background exemption)
   - Unlock Adreno 850 Max Clock (`thermal_pwrlevel=0`, 1450 MHz)
   - GPU Fast Ramp (`951 MHz` wake + `500 ms` idle timer, +24% FPS) & GPU Max Wake (`1450 MHz` docked)
   - **Unlock 8 Cores & Disable FAS Cap** (`core_ctl` keeps all 8 cores including both 5.01 GHz Prime cores active, disables `honor_fas` 2.4 GHz clamp)
   - **Docked Thermal Mode** (pauses Honor's 40 °C `dubaid` skin daemon & `hn_thermal` `cooling_switch`, keeping `iawareperf` UI boost + Qualcomm HW 105 °C CPUCP/LMh protection intact)
-  - WALT Burst Tuning (`hispeed_load=70`, `pl=1`)
+  - WALT Burst Tuning (`hispeed_load=70`, `pl=1`) & **WALT Prime-Bias** (`cluster0/1` upmigrate `95% → 40/45%` + `sched_asymcap_boost=1` for faster single-core & browser bursts)
   - RAM & Chroot Disk I/O (`swappiness=20`, `vfs_cache_pressure=50`, loop `read_ahead_kb=512`)
   - **THP Defrag Fix (`defer+madvise`, 2 MB `madvise`, ARM64 64 KB CONT-PTE `always`)**
   - **Tuned `jemalloc 5.3` Allocator** (`3.7×` faster for desktop/Mesa/shells; safely excluded from Chromium PartitionAlloc)

@@ -39,6 +39,7 @@ PERF_GPU_MAX_WAKE=0
 PERF_CPU_UNLOCK=1
 PERF_THERMAL_DOCKED=1
 PERF_WALT_BURST=1
+PERF_WALT_PRIME_BIAS=1
 PERF_VM_IO=1
 PERF_THP_OPT=1
 PERF_JEMALLOC=1
@@ -59,6 +60,7 @@ load_conf() {
     PERF_CPU_UNLOCK=1
     PERF_THERMAL_DOCKED=1
     PERF_WALT_BURST=1
+    PERF_WALT_PRIME_BIAS=1
     PERF_VM_IO=1
     PERF_THP_OPT=1
     PERF_JEMALLOC=1
@@ -350,6 +352,27 @@ apply_perf_tweaks() {
         (echo 0 > /sys/devices/system/cpu/cpufreq/policy6/walt/pl) 2>/dev/null || true
     fi
 
+    # 5b. WALT Prime-Bias (faster single-core migration to 5.01 GHz cpu6-7; keeps <10% idle tasks on Little)
+    if [ "$PERF_WALT_PRIME_BIAS" = "1" ]; then
+        (echo "40 25" > /proc/sys/walt/cluster0/sched_other_cgroup_updownmigrate) 2>/dev/null || true
+        (echo "40 25" > /proc/sys/walt/cluster0/sched_foreground_updownmigrate) 2>/dev/null || true
+        (echo "40 25" > /proc/sys/walt/cluster0/sched_topapp_updownmigrate) 2>/dev/null || true
+        (echo "45 30" > /proc/sys/walt/cluster1/sched_other_cgroup_updownmigrate) 2>/dev/null || true
+        (echo "45 30" > /proc/sys/walt/cluster1/sched_foreground_updownmigrate) 2>/dev/null || true
+        (echo "45 30" > /proc/sys/walt/cluster1/sched_topapp_updownmigrate) 2>/dev/null || true
+        (echo 1 > /proc/sys/walt/sched_asymcap_boost) 2>/dev/null || true
+        (echo 25 > /proc/sys/walt/sched_min_task_util_for_boost) 2>/dev/null || true
+    else
+        (echo "95 85" > /proc/sys/walt/cluster0/sched_other_cgroup_updownmigrate) 2>/dev/null || true
+        (echo "95 85" > /proc/sys/walt/cluster0/sched_foreground_updownmigrate) 2>/dev/null || true
+        (echo "85 75" > /proc/sys/walt/cluster0/sched_topapp_updownmigrate) 2>/dev/null || true
+        (echo "95 85" > /proc/sys/walt/cluster1/sched_other_cgroup_updownmigrate) 2>/dev/null || true
+        (echo "95 85" > /proc/sys/walt/cluster1/sched_foreground_updownmigrate) 2>/dev/null || true
+        (echo "95 85" > /proc/sys/walt/cluster1/sched_topapp_updownmigrate) 2>/dev/null || true
+        (echo 0 > /proc/sys/walt/sched_asymcap_boost) 2>/dev/null || true
+        (echo 51 > /proc/sys/walt/sched_min_task_util_for_boost) 2>/dev/null || true
+    fi
+
     # 6. Memory & chroot loop I/O tuning
     LDEV=$(get_loop_dev || true)
     if [ "$PERF_VM_IO" = "1" ]; then
@@ -422,7 +445,7 @@ do_set_toggle() {
     KEY="${1:-}"
     VAL="${2:-}"
     case "$KEY" in
-        PERF_HONOR_MODE|PERF_GPU_UNLOCK|PERF_GPU_RAMP|PERF_GPU_MAX_WAKE|PERF_CPU_UNLOCK|PERF_THERMAL_DOCKED|PERF_WALT_BURST|PERF_VM_IO|PERF_THP_OPT|PERF_JEMALLOC|PERF_XFCE_OPT|PERF_CHROMIUM_VULKAN|PERF_PULSEAUDIO|PERF_BOOT_PERSIST)
+        PERF_HONOR_MODE|PERF_GPU_UNLOCK|PERF_GPU_RAMP|PERF_GPU_MAX_WAKE|PERF_CPU_UNLOCK|PERF_THERMAL_DOCKED|PERF_WALT_BURST|PERF_WALT_PRIME_BIAS|PERF_VM_IO|PERF_THP_OPT|PERF_JEMALLOC|PERF_XFCE_OPT|PERF_CHROMIUM_VULKAN|PERF_PULSEAUDIO|PERF_BOOT_PERSIST)
             ;;
         *)
             echo "Unknown toggle key: $KEY" >&2
@@ -476,6 +499,7 @@ PERF_GPU_MAX_WAKE=0
 PERF_CPU_UNLOCK=0
 PERF_THERMAL_DOCKED=0
 PERF_WALT_BURST=0
+PERF_WALT_PRIME_BIAS=0
 PERF_VM_IO=0
 PERF_THP_OPT=0
 PERF_JEMALLOC=0
@@ -726,6 +750,7 @@ do_telemetry() {
     echo "PERF_CPU_UNLOCK=$PERF_CPU_UNLOCK"
     echo "PERF_THERMAL_DOCKED=$PERF_THERMAL_DOCKED"
     echo "PERF_WALT_BURST=$PERF_WALT_BURST"
+    echo "PERF_WALT_PRIME_BIAS=$PERF_WALT_PRIME_BIAS"
     echo "PERF_VM_IO=$PERF_VM_IO"
     echo "PERF_THP_OPT=$PERF_THP_OPT"
     echo "PERF_JEMALLOC=$PERF_JEMALLOC"
