@@ -253,19 +253,20 @@ Run [`scripts/setup-macos-desktop.sh`](scripts/setup-macos-desktop.sh) inside th
 
 ---
 
-## Android Manager App (`Debian GPU v2.4`)
+## Android Manager App (`Debian GPU v2.5`)
 
-Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, macOS 27.2 VM, audio bridge, and performance tweaks from a lightweight (~60 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
+Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, macOS 27.2 VM, Honor RAM debloat, audio bridge, and performance tweaks from a lightweight (~60 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
 
 <p align="center">
-  <img src="assets/apk-v2-screenshot.png" alt="Debian GPU v2.4 Android Manager with live CPU/GPU telemetry, macOS 27 launcher, and persistent toggles" width="340" />
+  <img src="assets/apk-v2-screenshot.png" alt="Debian GPU v2.5 Android Manager with live CPU/GPU telemetry, macOS 27 launcher, Honor debloat, and persistent toggles" width="340" />
 </p>
 
 - **Live CPU / GPU / Thermal Telemetry (auto-refreshes every 2.5s, toggleable `Live` / `Paused`):**
   - Real-time frequency meters for **CPU Little (0–2)**, **CPU Big (3–5)**, **CPU Prime (6–7)** (highlighted amber whenever capped below hardware max), and **Adreno 850 GPU** (`MHz / 1450 MHz · busy%`).
   - Live KGSL state (`thermal_lvl`, wake clock, `idle_timer`), live HAL **CPU / GPU / Skin temps**, Android thermal status, battery/charging state, Honor power mode, **RAM / ZRAM / swappiness / loop read-ahead**, plus a warning banner when Honor Launcher is capping CPU clocks. *(Tip: leaving Debian GPU open on the phone screen while docked prevents Honor's home-screen CPU cap.)*
-- **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **macOS 27.2 VM (Gunyah `Running` / `Booting...` / `Stopped`)**, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**, and **Desktop Allocator (`jemalloc 5.3` / `glibc`)**.
+- **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **macOS 27.2 VM (Gunyah `Running` / `Booting...` / `Stopped`)**, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**, **Desktop Allocator (`jemalloc 5.3` / `glibc`)**, and **Honor MagicOS Bloat (`Debloated` / `N Active`)**.
 - **One-tap Desktop, macOS 27 & Audio Controls:** Start Desktop (auto-stops macOS VM & opens Termux:X11), Open Display, **Start macOS 27** (auto-stops XFCE4, launches Gunyah + Adreno 850 Venus VM & `xnu_fb_view`, opens Termux:X11), **Stop macOS**, Stop Desktop, Unmount Image, **Apply Perf Now**, and **Fix Audio Sink** (repairs `AAudio_sink` and routes active streams).
+- **Honor RAM & Debloat (Safe / User-Space Only):** One-tap **Debloat Honor** (disables/uninstalls for user 0 all 55 Honor Auto, YOYO AI, Brain, Global Search, Cloud, Share, Theme, Push & China bloat packages — freeing **~795 MB PSS** without touching `/system`), **Free RAM Now** (`am kill-all` + `drop_caches`), and **Restore Honor Bloat** (100% reversible).
 - **15 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
   - Honor Performance Mode (`SmartModeStatus=4` + `Termux:X11` background exemption)
   - Unlock Adreno 850 Max Clock (`thermal_pwrlevel=0`, 1450 MHz)
@@ -320,6 +321,9 @@ su -c "/data/adb/debian-gpu.sh set-toggle KEY 0|1"   # Persist and live-apply on
 su -c "/data/adb/debian-gpu.sh reset-perf"           # Restore stock defaults for all perf toggles
 su -c "/data/adb/debian-gpu.sh audio-fix"            # Start/repair Termux PulseAudio AAudio_sink and move active streams
 su -c "/data/adb/debian-gpu.sh audio-stop"           # Stop Termux PulseAudio daemon
+su -c "/data/adb/debian-gpu.sh debloat"              # Disable 55 safe Honor/YOYO/China bloat packages in user-space (~795 MB PSS)
+su -c "/data/adb/debian-gpu.sh restore-bloat"        # Restore all Honor packages disabled by debloat
+su -c "/data/adb/debian-gpu.sh free-ram"             # Evict idle cached apps & drop Linux page cache
 su -c "/data/adb/debian-gpu.sh telemetry"            # Print machine-readable live CPU/GPU/thermal/service telemetry
 su -c "/data/adb/debian-gpu.sh shell"                # Open interactive Debian shell as user 'droid'
 su -c "/data/adb/debian-gpu.sh vnc"                  # Restart VNC/noVNC & Tailscale proxy without closing apps

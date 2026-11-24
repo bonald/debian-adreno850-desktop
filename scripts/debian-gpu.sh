@@ -18,6 +18,9 @@
 #   su -c "/data/adb/debian-gpu.sh reset-perf"       - Restore stock defaults for all toggles
 #   su -c "/data/adb/debian-gpu.sh audio-fix"        - Start/repair Termux PulseAudio AAudio_sink
 #   su -c "/data/adb/debian-gpu.sh telemetry"        - Machine-readable live status for Debian GPU APK
+#   su -c "/data/adb/debian-gpu.sh debloat"          - Disable 55 safe Honor/YOYO/China bloat packages (user-space)
+#   su -c "/data/adb/debian-gpu.sh restore-bloat"    - Restore all Honor packages disabled by debloat
+#   su -c "/data/adb/debian-gpu.sh free-ram"         - Evict cached background apps & drop page cache
 #   su -c "/data/adb/debian-gpu.sh vnc"              - Restart VNC + noVNC proxy
 #   su -c "/data/adb/debian-gpu.sh passwd"           - Change VNC password
 
@@ -668,6 +671,149 @@ do_macos_log() {
     fi
 }
 
+# Safe, 100% reversible user-space Honor MagicOS debloat (never touches /system or /vendor)
+# Excludes firmware-protected packages (id, parentcontrol, findmydevice) and core stability/projection packages.
+HONOR_DEBLOAT_DISABLE="
+com.hihonor.auto
+com.hihonor.awareness
+com.hihonor.brain
+com.hihonor.assistant
+com.hihonor.magicvoice
+com.hihonor.searchservice
+com.hihonor.search
+com.hihonor.aipluginengine
+com.hihonor.android.UEInfoCheck
+com.hihonor.hnmagicportal
+com.hihonor.suggestion
+com.hihonor.aimage.agent
+com.hihonor.globalwrite
+com.hihonor.recordassistant
+com.hihonor.hnstandby
+com.hihonor.voiceengine
+com.hihonor.android.AutoRegSms
+com.hihonor.android.chr
+com.hihonor.android.upgradeguide
+com.hihonor.hnstartupguide
+com.hihonor.browserhomepage
+com.honor.reader
+com.baidu.input_hihonor
+com.sohu.inputmethod.sogou.honor
+com.hihonor.scenariomanager
+com.hihonor.sceneservice
+com.hihonor.quickengine
+com.hihonor.smartiot
+com.hihonor.intelligentmessage
+com.hihonor.servicecenter
+com.hihonor.detectrepair
+com.hihonor.msdp
+com.hihonor.hncloud
+com.hihonor.assetsync
+com.hihonor.assetsyncservice
+com.hihonor.contacts.sync
+com.hihonor.koBackup
+com.hihonor.android.thememanager
+com.hihonor.devicefinder
+com.hihonor.dms
+com.hihonor.airlink
+com.hihonor.handoff
+com.hihonor.synergy
+com.hihonor.android.instantshare
+com.hihonor.crossdeviceserviceshare
+com.hihonor.pcassistant
+com.hihonor.android.honorsuite
+com.hihonor.remoteassist
+com.hihonor.android.clone
+com.hihonor.wallet
+com.hihonor.hnpanpayservice
+"
+
+# Persistent user-space bloat (removed for user 0 only; reversible via cmd package install-existing)
+HONOR_DEBLOAT_UNINSTALL_U0="
+com.hihonor.android.pushagent
+com.hihonor.hiview
+com.hihonor.nearby
+com.honor.aimm
+"
+
+do_debloat() {
+    RESTORE_SCRIPT=/data/adb/restore-honor-bloat.sh
+    ENABLED_LIST=$(pm list packages -e 2>/dev/null || true)
+    NEW_DIS=0
+    NEW_UNINST=0
+    ALREADY=0
+
+    cat > "$RESTORE_SCRIPT" <<'EOF'
+#!/system/bin/sh
+# Auto-generated restore script for Honor MagicOS user-space debloat
+# Run as root: su -c /data/adb/restore-honor-bloat.sh
+EOF
+    chmod 755 "$RESTORE_SCRIPT"
+
+    for p in $HONOR_DEBLOAT_DISABLE; do
+        echo "pm enable --user 0 $p >/dev/null 2>&1 || true" >> "$RESTORE_SCRIPT"
+        if printf "%s\n" "$ENABLED_LIST" | grep -qx "package:$p"; then
+            if pm disable-user --user 0 "$p" >/dev/null 2>&1; then
+                am force-stop "$p" >/dev/null 2>&1 || true
+                NEW_DIS=$((NEW_DIS + 1))
+            fi
+        else
+            ALREADY=$((ALREADY + 1))
+        fi
+    done
+
+    for p in $HONOR_DEBLOAT_UNINSTALL_U0; do
+        echo "cmd package install-existing $p >/dev/null 2>&1 || true" >> "$RESTORE_SCRIPT"
+        echo "pm enable --user 0 $p >/dev/null 2>&1 || true" >> "$RESTORE_SCRIPT"
+        if printf "%s\n" "$ENABLED_LIST" | grep -qx "package:$p"; then
+            if pm uninstall -k --user 0 "$p" >/dev/null 2>&1; then
+                am force-stop "$p" >/dev/null 2>&1 || true
+                NEW_UNINST=$((NEW_UNINST + 1))
+            fi
+        else
+            ALREADY=$((ALREADY + 1))
+        fi
+    done
+
+    AVAIL_MB=$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo "?")
+    echo "Honor MagicOS debloat complete (user-space only; /system untouched)."
+    echo "Newly disabled: $NEW_DIS | Uninstalled (u0): $NEW_UNINST | Already clean: $ALREADY"
+    echo "Restore script: $RESTORE_SCRIPT"
+    echo "MemAvailable now: ${AVAIL_MB} MB"
+    if pgrep -f 'com\.hihonor\.(nearby|hiview|android\.pushagent)' >/dev/null 2>&1; then
+        echo "Note: persistent daemons (nearby/pushagent/hiview) are uninstalled for u0 and stay off after reboot (+~120 MB)."
+    fi
+}
+
+do_restore_bloat() {
+    RESTORED=0
+    for p in $HONOR_DEBLOAT_UNINSTALL_U0; do
+        if cmd package install-existing "$p" >/dev/null 2>&1; then
+            pm enable --user 0 "$p" >/dev/null 2>&1 || true
+            RESTORED=$((RESTORED + 1))
+        fi
+    done
+    for p in $HONOR_DEBLOAT_DISABLE; do
+        if pm enable --user 0 "$p" >/dev/null 2>&1; then
+            RESTORED=$((RESTORED + 1))
+        fi
+    done
+    echo "Restored $RESTORED Honor packages (user 0). Reboot recommended if persistent services were restored."
+}
+
+do_free_ram() {
+    BEFORE_FREE=$(awk '/^MemFree:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+    BEFORE_AVAIL=$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+    am kill-all >/dev/null 2>&1 || true
+    sync
+    (echo 3 > /proc/sys/vm/drop_caches) 2>/dev/null || true
+    sleep 0.5
+    AFTER_FREE=$(awk '/^MemFree:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+    AFTER_AVAIL=$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
+    echo "Evicted idle cached apps & dropped Linux page cache."
+    echo "MemFree:      ${BEFORE_FREE} MB -> ${AFTER_FREE} MB"
+    echo "MemAvailable: ${BEFORE_AVAIL} MB -> ${AFTER_AVAIL} MB"
+}
+
 start_vnc_tailscale_proxy() {
     local ts_ip="${1:-$(get_tailscale_ip || true)}"
     pkill -9 -f "TCP-LISTEN:[5]900" 2>/dev/null || true
@@ -882,6 +1028,15 @@ do_telemetry() {
     echo "LOOP_RA=$([ -n "$LDEV" ] && cat "/sys/block/$LDEV/queue/read_ahead_kb" 2>/dev/null || echo '?')"
     echo "THP_DEFRAG=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || echo '?')"
 
+    # Honor MagicOS debloat status (checks the 17 primary resident Honor bloat packages)
+    BLOAT_ACT=$(pm list packages -e 2>/dev/null | grep -cE '^package:(com\.hihonor\.(auto|awareness|brain|assistant|magicvoice|searchservice|aipluginengine|dms|android\.UEInfoCheck|msdp|hncloud|android\.thememanager|android\.pushagent|nearby|hiview|wallet)|com\.honor\.aimm)$' || true)
+    echo "HONOR_BLOAT_ACTIVE=${BLOAT_ACT:-0}"
+    if [ "${BLOAT_ACT:-0}" = "0" ] && pgrep -f 'com\.hihonor\.(nearby|hiview|android\.pushagent)' >/dev/null 2>&1; then
+        echo "HONOR_BLOAT_REBOOT=1"
+    else
+        echo "HONOR_BLOAT_REBOOT=0"
+    fi
+
     # Toggles from persistent config
     echo "PERF_HONOR_MODE=$PERF_HONOR_MODE"
     echo "PERF_GPU_UNLOCK=$PERF_GPU_UNLOCK"
@@ -913,9 +1068,12 @@ case "${1:-status}" in
     boot-apply)  apply_perf_tweaks ;;
     set-toggle)  do_set_toggle "${2:-}" "${3:-}" ;;
     reset-perf)  do_reset_perf ;;
-    audio-fix)   PERF_PULSEAUDIO=1; start_pulseaudio; echo "PulseAudio AAudio_sink ready." ;;
-    audio-stop)  stop_pulseaudio; echo "PulseAudio stopped." ;;
-    telemetry)   do_telemetry ;;
+    audio-fix)     PERF_PULSEAUDIO=1; start_pulseaudio; echo "PulseAudio AAudio_sink ready." ;;
+    audio-stop)    stop_pulseaudio; echo "PulseAudio stopped." ;;
+    debloat)       do_debloat ;;
+    restore-bloat) do_restore_bloat ;;
+    free-ram)      do_free_ram ;;
+    telemetry)     do_telemetry ;;
     shell)
         do_mount
         exec chroot "$MNT" /usr/bin/env -i \
@@ -934,7 +1092,7 @@ case "${1:-status}" in
         do_start
         ;;
     *)
-        echo "Usage: $0 {start|stop|macos-start|macos-stop|macos-log|umount|shell|status|vnc|perf|set-toggle|reset-perf|audio-fix|audio-stop|telemetry|passwd}" >&2
+        echo "Usage: $0 {start|stop|macos-start|macos-stop|macos-log|umount|shell|status|vnc|perf|set-toggle|reset-perf|audio-fix|audio-stop|debloat|restore-bloat|free-ram|telemetry|passwd}" >&2
         exit 1
         ;;
 esac

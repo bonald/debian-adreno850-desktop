@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     private TextView tvGpuDetail, tvThermalsLine, tvPowerLine, tvMemLine, tvLauncherWarn;
 
     // System status badges
-    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeMacos, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator;
+    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeMacos, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator, badgeDebloat;
     private TextView tvNoVncUrl, tvVncAddr, tvDiskInfo, tvConsole, tvBusyStatus;
     private ScrollView consoleScroll;
 
@@ -187,7 +187,7 @@ public class MainActivity extends Activity {
         titleLine.addView(title);
 
         TextView verPill = new TextView(this);
-        verPill.setText("v2.4");
+        verPill.setText("v2.5");
         verPill.setTextColor(Color.parseColor("#7DCFFF"));
         verPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         verPill.setTypeface(Typeface.DEFAULT_BOLD);
@@ -261,6 +261,7 @@ public class MainActivity extends Activity {
         badgeVnc = addStatusRow(statusCard, "Remote X (VNC + noVNC)");
         badgeBrowserGpu = addStatusRow(statusCard, "Brave / Electron GPU");
         badgeAllocator = addStatusRow(statusCard, "Desktop Allocator");
+        badgeDebloat = addStatusRow(statusCard, "Honor MagicOS Bloat");
 
         tvDiskInfo = makeInfoLine(statusCard, "Image: /data/adb/debian-gpu.img", COL_MUTED, 11, false);
         root.addView(statusCard);
@@ -317,6 +318,35 @@ public class MainActivity extends Activity {
         addWeighted(row3, btnFixAudio, dp(5), 0);
         ctrlCard.addView(row3);
         root.addView(ctrlCard);
+
+        // --- Honor RAM & Debloat Card ---
+        LinearLayout debloatCard = makeCard("HONOR RAM & DEBLOAT (SAFE / REVERSIBLE)");
+        TextView tvDebloatNote = new TextView(this);
+        tvDebloatNote.setText("User-space only (/system untouched): disables 55 Honor Auto, YOYO AI, Cloud, Share, Theme, Push & China bloat packages (~795 MB PSS freed).");
+        tvDebloatNote.setTextColor(COL_MUTED);
+        tvDebloatNote.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        tvDebloatNote.setPadding(0, 0, 0, dp(10));
+        debloatCard.addView(tvDebloatNote);
+
+        LinearLayout dRow1 = makeRow();
+        Button btnDebloat = makeButton("Debloat Honor", Color.parseColor("#0D9488"), Color.WHITE, true);
+        btnDebloat.setOnClickListener(v -> confirmDebloatHonor());
+        Button btnFreeRam = makeButton("Free RAM Now", Color.parseColor("#133040"),
+                Color.parseColor("#7DCFFF"), true);
+        btnFreeRam.setOnClickListener(v -> runRootAction("Evicting idle apps & dropping page cache...",
+                "/data/adb/debian-gpu.sh free-ram", false));
+        addWeighted(dRow1, btnDebloat, 0, dp(5));
+        addWeighted(dRow1, btnFreeRam, dp(5), 0);
+        debloatCard.addView(dRow1);
+
+        Button btnRestoreBloat = makeButton("Restore Honor Bloat", Color.parseColor("#2A2226"),
+                Color.parseColor("#FCA5A5"), false);
+        LinearLayout.LayoutParams restoreBloatLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
+        restoreBloatLp.topMargin = dp(8);
+        btnRestoreBloat.setOnClickListener(v -> confirmRestoreBloat());
+        debloatCard.addView(btnRestoreBloat, restoreBloatLp);
+        root.addView(debloatCard);
 
         // --- Persistent Performance & GPU Tweaks Card ---
         LinearLayout perfCard = makeCard("PERFORMANCE & GPU TWEAKS (PERSISTENT)");
@@ -744,6 +774,26 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    private void confirmDebloatHonor() {
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Debloat Honor MagicOS?")
+                .setMessage("Disables 55 Honor Auto, YOYO AI, Brain, Global Search, Cloud, Share, Themes, Push & China apps in user-space only (never modifies /system; keeps USB-C projection, camera, eSIM & GMS intact). Fully reversible via Restore Honor Bloat.")
+                .setPositiveButton("Debloat", (d, w) ->
+                        runRootAction("Debloating Honor MagicOS (user-space)...", "/data/adb/debian-gpu.sh debloat", false))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmRestoreBloat() {
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Restore Honor Bloat?")
+                .setMessage("Re-enables and restores all 55 Honor packages for user 0.")
+                .setPositiveButton("Restore", (d, w) ->
+                        runRootAction("Restoring Honor packages...", "/data/adb/debian-gpu.sh restore-bloat", false))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void showVncPasswordDialog() {
         final EditText input = new EditText(this);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -922,6 +972,8 @@ public class MainActivity extends Activity {
         final String thpDefrag = m.getOrDefault("THP_DEFRAG", "?");
         final boolean vulkanOn = "1".equals(m.get("PERF_CHROMIUM_VULKAN"));
         final boolean jemallocOn = "1".equals(m.get("PERF_JEMALLOC"));
+        final long bloatActive = parseLongSafe(m.get("HONOR_BLOAT_ACTIVE"), 0);
+        final boolean bloatReboot = "1".equals(m.get("HONOR_BLOAT_REBOOT"));
 
         ui.post(() -> {
             int okBg = Color.parseColor("#143322");
@@ -1028,6 +1080,14 @@ public class MainActivity extends Activity {
                     vulkanOn ? infoFg : warnFg, vulkanOn ? infoBg : warnBg);
             setBadge(badgeAllocator, jemallocOn ? "jemalloc 5.3" : "glibc",
                     jemallocOn ? okFg : COL_MUTED, jemallocOn ? okBg : COL_SURFACE_BTN);
+
+            if (bloatActive == 0 && !bloatReboot) {
+                setBadge(badgeDebloat, "Debloated", okFg, okBg);
+            } else if (bloatActive == 0) {
+                setBadge(badgeDebloat, "Clean (Reboot +120M)", infoFg, infoBg);
+            } else {
+                setBadge(badgeDebloat, bloatActive + " Active", warnFg, warnBg);
+            }
 
             String host = TextUtils.isEmpty(ts) ? "127.0.0.1" : ts;
             tvNoVncUrl.setText("noVNC: http://" + host + ":6080/vnc.html");
