@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     private TextView tvGpuDetail, tvThermalsLine, tvPowerLine, tvMemLine, tvLauncherWarn;
 
     // System status badges
-    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator;
+    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeMacos, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator;
     private TextView tvNoVncUrl, tvVncAddr, tvDiskInfo, tvConsole, tvBusyStatus;
     private ScrollView consoleScroll;
 
@@ -187,7 +187,7 @@ public class MainActivity extends Activity {
         titleLine.addView(title);
 
         TextView verPill = new TextView(this);
-        verPill.setText("v2.3");
+        verPill.setText("v2.4");
         verPill.setTextColor(Color.parseColor("#7DCFFF"));
         verPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         verPill.setTypeface(Typeface.DEFAULT_BOLD);
@@ -256,6 +256,7 @@ public class MainActivity extends Activity {
         badgeMount = addStatusRow(statusCard, "Debian 13 Chroot");
         badgeX11 = addStatusRow(statusCard, "Termux:X11 (:0)");
         badgeDesktop = addStatusRow(statusCard, "Desktop (XFCE4 + Plank)");
+        badgeMacos = addStatusRow(statusCard, "macOS 27.2 VM (Gunyah)");
         badgeAudio = addStatusRow(statusCard, "PulseAudio (AAudio :4713)");
         badgeVnc = addStatusRow(statusCard, "Remote X (VNC + noVNC)");
         badgeBrowserGpu = addStatusRow(statusCard, "Brave / Electron GPU");
@@ -276,6 +277,19 @@ public class MainActivity extends Activity {
         addWeighted(row1, btnStart, 0, dp(5));
         addWeighted(row1, btnOpen, dp(5), 0);
         ctrlCard.addView(row1);
+
+        LinearLayout rowMacos = makeRow();
+        rowMacos.setPadding(0, dp(8), 0, 0);
+        Button btnStartMacos = makeButton("Start macOS 27", Color.parseColor("#6366F1"), Color.WHITE, true);
+        btnStartMacos.setOnClickListener(v -> runRootAction("Starting macOS 27.2 VM (Gunyah + Venus)...",
+                "/data/adb/debian-gpu.sh macos-start", true));
+        Button btnStopMacos = makeButton("Stop macOS", Color.parseColor("#3B1B22"),
+                Color.parseColor("#FCA5A5"), false);
+        btnStopMacos.setOnClickListener(v -> runRootAction("Stopping macOS 27.2 VM...",
+                "/data/adb/debian-gpu.sh macos-stop", false));
+        addWeighted(rowMacos, btnStartMacos, 0, dp(5));
+        addWeighted(rowMacos, btnStopMacos, dp(5), 0);
+        ctrlCard.addView(rowMacos);
 
         LinearLayout row2 = makeRow();
         row2.setPadding(0, dp(8), 0, 0);
@@ -421,13 +435,17 @@ public class MainActivity extends Activity {
         addWeighted(tRow2, btnRestartVnc, dp(5), 0);
         toolsCard.addView(tRow2);
 
-        Button btnAudioFix = makeButton("Fix AVF Terminal Audio (SELinux)", COL_SURFACE_BTN, COL_MUTED, false);
-        LinearLayout.LayoutParams audioLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(38));
-        audioLp.topMargin = dp(8);
+        LinearLayout tRow3 = makeRow();
+        tRow3.setPadding(0, dp(8), 0, 0);
+        Button btnMacosLog = makeButton("macOS Log", COL_SURFACE_BTN, Color.parseColor("#C7D2FE"), false);
+        btnMacosLog.setOnClickListener(v -> runRootAction("Reading macOS VM & XNU dmesg log...",
+                "/data/adb/debian-gpu.sh macos-log", false));
+        Button btnAudioFix = makeButton("Fix AVF Audio", COL_SURFACE_BTN, COL_MUTED, false);
         btnAudioFix.setOnClickListener(v -> runRootAction("Applying crosvm_vu_snd SELinux audio rules...",
                 "/data/adb/fix-terminal.sh", false));
-        toolsCard.addView(btnAudioFix, audioLp);
+        addWeighted(tRow3, btnMacosLog, 0, dp(5));
+        addWeighted(tRow3, btnAudioFix, dp(5), 0);
+        toolsCard.addView(tRow3);
         root.addView(toolsCard);
 
         // --- Console Output Card ---
@@ -849,6 +867,10 @@ public class MainActivity extends Activity {
         final boolean x11 = "1".equals(m.get("X11"));
         final boolean desktop = "1".equals(m.get("DESKTOP"));
         final boolean plank = "1".equals(m.get("PLANK"));
+        final boolean macosAvail = "1".equals(m.get("MACOS_AVAIL"));
+        final boolean macosVm = "1".equals(m.get("MACOS_VM"));
+        final boolean macosView = "1".equals(m.get("MACOS_VIEW"));
+        final boolean macosReady = "1".equals(m.get("MACOS_READY"));
         final boolean vnc = "1".equals(m.get("VNC"));
         final boolean novnc = "1".equals(m.get("NOVNC"));
         final String pulse = m.getOrDefault("PULSE", "stopped");
@@ -970,6 +992,20 @@ public class MainActivity extends Activity {
                 setBadge(badgeDesktop, "XFCE only", warnFg, warnBg);
             } else {
                 setBadge(badgeDesktop, "Stopped", offFg, offBg);
+            }
+
+            if (!macosAvail) {
+                setBadge(badgeMacos, "Not Installed", COL_MUTED, COL_SURFACE_BTN);
+            } else if (macosVm && macosView && macosReady) {
+                setBadge(badgeMacos, "Running", okFg, okBg);
+            } else if (macosVm && !macosView) {
+                setBadge(badgeMacos, "VM Only", warnFg, warnBg);
+            } else if (macosVm) {
+                setBadge(badgeMacos, "Booting...", warnFg, warnBg);
+            } else if (macosView) {
+                setBadge(badgeMacos, "Viewer Only", warnFg, warnBg);
+            } else {
+                setBadge(badgeMacos, "Stopped", offFg, offBg);
             }
 
             if ("aaudio".equals(pulse)) {

@@ -253,19 +253,19 @@ Run [`scripts/setup-macos-desktop.sh`](scripts/setup-macos-desktop.sh) inside th
 
 ---
 
-## Android Manager App (`Debian GPU v2.3`)
+## Android Manager App (`Debian GPU v2.4`)
 
-Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, audio bridge, and performance tweaks from a lightweight (~60 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
+Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can manage the desktop, macOS 27.2 VM, audio bridge, and performance tweaks from a lightweight (~60 KB, zero-Gradle) Android app (`com.debiangpu.manager`):
 
 <p align="center">
-  <img src="assets/apk-v2-screenshot.png" alt="Debian GPU v2.0 Android Manager with live CPU/GPU telemetry and persistent toggles" width="340" />
+  <img src="assets/apk-v2-screenshot.png" alt="Debian GPU v2.4 Android Manager with live CPU/GPU telemetry, macOS 27 launcher, and persistent toggles" width="340" />
 </p>
 
 - **Live CPU / GPU / Thermal Telemetry (auto-refreshes every 2.5s, toggleable `Live` / `Paused`):**
   - Real-time frequency meters for **CPU Little (0–2)**, **CPU Big (3–5)**, **CPU Prime (6–7)** (highlighted amber whenever capped below hardware max), and **Adreno 850 GPU** (`MHz / 1450 MHz · busy%`).
   - Live KGSL state (`thermal_lvl`, wake clock, `idle_timer`), live HAL **CPU / GPU / Skin temps**, Android thermal status, battery/charging state, Honor power mode, **RAM / ZRAM / swappiness / loop read-ahead**, plus a warning banner when Honor Launcher is capping CPU clocks. *(Tip: leaving Debian GPU open on the phone screen while docked prevents Honor's home-screen CPU cap.)*
-- **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), and **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**.
-- **One-tap Desktop & Audio Controls:** Start Desktop (auto-opens Termux:X11), Open Display, Stop Desktop, Unmount Image, **Apply Perf Now**, and **Fix Audio Sink** (repairs `AAudio_sink` and routes active streams).
+- **Expanded System Status Badges:** Root (KernelSU `su -M`), Debian Chroot mount & disk usage, Termux:X11 (`:0`), XFCE4 + Plank desktop, **macOS 27.2 VM (Gunyah `Running` / `Booting...` / `Stopped`)**, **PulseAudio (`AAudio Live` / `Null Sink`)**, Remote X (VNC + noVNC), **Brave / Electron GPU (`Native Vulkan` / `Zink GL`)**, and **Desktop Allocator (`jemalloc 5.3` / `glibc`)**.
+- **One-tap Desktop, macOS 27 & Audio Controls:** Start Desktop (auto-stops macOS VM & opens Termux:X11), Open Display, **Start macOS 27** (auto-stops XFCE4, launches Gunyah + Adreno 850 Venus VM & `xnu_fb_view`, opens Termux:X11), **Stop macOS**, Stop Desktop, Unmount Image, **Apply Perf Now**, and **Fix Audio Sink** (repairs `AAudio_sink` and routes active streams).
 - **15 Persistent Performance & GPU Toggle Switches** (saved in `/data/adb/debian-gpu.conf` and auto-applied on reboot via KernelSU `/data/adb/service.d/99-debian-gpu-perf.sh`), plus **Restore Stock Defaults**:
   - Honor Performance Mode (`SmartModeStatus=4` + `Termux:X11` background exemption)
   - Unlock Adreno 850 Max Clock (`thermal_pwrlevel=0`, 1450 MHz)
@@ -279,7 +279,7 @@ Instead of typing `su -c "/data/adb/debian-gpu.sh ..."` every time, you can mana
   - XFCE4 No Shadows + `XPresent` sync
   - Native Vulkan (`GaneshVulkan` + `ANGLE Vulkan`, +29% WebGL) for Brave & Electron apps
   - PulseAudio Bridge (`AAudio :4713`) & Auto-Apply on Reboot (`service.d`)
-- **Remote X & Quick Tools:** Auto-detects your Tailscale IP (Copy noVNC, Copy VNC, Open Web, Change VNC Password), Launch Terminal, **Launch Brave**, Verify GPU (`vulkaninfo` + `glxinfo`), **Restart VNC**, Fix AVF Terminal Audio, and a clearable Console Output view.
+- **Remote X & Quick Tools:** Auto-detects your Tailscale IP (Copy noVNC, Copy VNC, Open Web, Change VNC Password), Launch Terminal, **Launch Brave**, Verify GPU (`vulkaninfo` + `glxinfo`), **Restart VNC**, **macOS Log**, Fix AVF Audio, and a clearable Console Output view.
 
 ### Install the Prebuilt APK
 
@@ -311,6 +311,9 @@ Pass `--regen-icons` (requires `python3-pil`) if you want to regenerate the `mip
 
 ```sh
 su -c "/data/adb/debian-gpu.sh start"                # Apply perf tweaks, mount chroot, start X11, PulseAudio, XFCE4+Plank & VNC
+su -c "/data/adb/debian-gpu.sh macos-start"          # Switch to macOS 27.2 VM (Gunyah + Adreno 850 Venus + xnu_fb_view on :0)
+su -c "/data/adb/debian-gpu.sh macos-stop"           # Stop macOS 27.2 VM & xnu_fb_view
+su -c "/data/adb/debian-gpu.sh macos-log"            # Tail recent macOS VM & XNU dmesg logs
 su -c "/data/adb/debian-gpu.sh status"               # Check service status and print Tailscale VNC / noVNC URLs
 su -c "/data/adb/debian-gpu.sh perf"                 # Re-apply all enabled tweaks from /data/adb/debian-gpu.conf
 su -c "/data/adb/debian-gpu.sh set-toggle KEY 0|1"   # Persist and live-apply one toggle (e.g. PERF_CHROMIUM_VULKAN 1)

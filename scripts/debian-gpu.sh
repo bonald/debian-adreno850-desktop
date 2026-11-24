@@ -7,7 +7,10 @@
 # Usage:
 #   su -c "/data/adb/debian-gpu.sh start"            - Apply perf, mount, X11, audio, desktop & VNC
 #   su -c "/data/adb/debian-gpu.sh stop"             - Stop desktop, VNC & noVNC
-#   su -c "/data/adb/debian-gpu.sh umount"           - Stop services and unmount chroot image
+#   su -c "/data/adb/debian-gpu.sh macos-start"      - Switch to macOS 27.2 VM (Gunyah + xnu_fb_view on :0)
+#   su -c "/data/adb/debian-gpu.sh macos-stop"       - Stop macOS 27.2 VM & xnu_fb_view
+#   su -c "/data/adb/debian-gpu.sh macos-log"        - Show recent macOS VM & XNU dmesg logs
+#   su -c "/data/adb/debian-gpu.sh umount"           - Stop services/VM and unmount chroot image
 #   su -c "/data/adb/debian-gpu.sh shell"            - Interactive bash shell as droid
 #   su -c "/data/adb/debian-gpu.sh status"           - Show running services & remote URLs
 #   su -c "/data/adb/debian-gpu.sh perf"             - Apply all enabled perf tweaks from config
@@ -24,6 +27,10 @@ IMG=/data/adb/debian-gpu.img
 MNT=/data/local/debian-gpu
 CONF=/data/adb/debian-gpu.conf
 BOOT_SCRIPT=/data/adb/service.d/99-debian-gpu-perf.sh
+MACOS_SCRIPT=/data/adb/run-xnulinux-vm.sh
+MACOS_DIR=/data/local/xnu-mac
+MACOS_LOG=/data/local/tmp/vm_macos_live.log
+MACOS_VIEW_LOG=/tmp/xnu_fb_view.log
 TUID=10459
 TPREFIX=/data/data/com.termux/files/usr
 THOME=/data/data/com.termux/files/home
@@ -551,6 +558,116 @@ do_stop() {
     echo "Debian GPU desktop & remote X stopped."
 }
 
+ensure_macos_bind() {
+    mkdir -p "$MACOS_DIR" "$MACOS_DIR/mesa_shader_cache" "$MNT/var/xnu-mac"
+    mountpoint -q "$MNT/var/xnu-mac" 2>/dev/null || mount --bind "$MACOS_DIR" "$MNT/var/xnu-mac"
+}
+
+do_macos_stop() {
+    pkill -TERM -x xnu_fb_view 2>/dev/null || true
+    pkill -TERM -f "[r]un-xnulinux-vm.sh" 2>/dev/null || true
+    pkill -TERM -x crosvm 2>/dev/null || true
+    i=0
+    while (pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1) && [ "$i" -lt 10 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+    pkill -KILL -x xnu_fb_view 2>/dev/null || true
+    pkill -KILL -f "[r]un-xnulinux-vm.sh" 2>/dev/null || true
+    pkill -KILL -x crosvm 2>/dev/null || true
+    if [ -r /sys/power/wake_lock ] && [ -w /sys/power/wake_unlock ]; then
+        for wl in $(tr ' ' '\n' < /sys/power/wake_lock 2>/dev/null | grep '^xnulinux_vm_' || true); do
+            echo "$wl" > /sys/power/wake_unlock 2>/dev/null || true
+        done
+    fi
+    echo "macOS 27 VM stopped."
+}
+
+do_macos_start() {
+    if [ ! -x "$MACOS_SCRIPT" ]; then
+        echo "Error: $MACOS_SCRIPT not found or not executable." >&2
+        exit 1
+    fi
+    do_mount
+    ensure_macos_bind
+    apply_perf_tweaks
+    start_termux_x11
+
+    # Free Termux:X11 (:0) and RAM by stopping Debian desktop & any prior VM instance
+    if pgrep -x xfwm4 >/dev/null 2>&1 || pgrep -x plank >/dev/null 2>&1 || pgrep -x x0vncserver >/dev/null 2>&1; then
+        echo "Stopping Debian XFCE4 desktop before starting macOS 27..."
+        kill_desktop_procs
+    fi
+    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -f "[r]un-xnulinux-vm.sh" >/dev/null 2>&1; then
+        do_macos_stop >/dev/null 2>&1 || true
+    fi
+    sleep 0.5
+
+    # Reset XNU dmesg log so readiness reflects this boot
+    : > "$MACOS_DIR/xnu-dmesg.log" 2>/dev/null || true
+    : > "$MACOS_LOG" 2>/dev/null || true
+
+    FB_W="${FB_WIDTH:-1920}"
+    FB_H="${FB_HEIGHT:-1080}"
+
+    # Launch zero-copy X11 framebuffer viewer inside chroot as root (needs /proc/<crosvm>/fd access)
+    if [ -x "$MNT/usr/local/bin/xnu_fb_view" ]; then
+        setsid chroot "$MNT" /usr/bin/env -i \
+            DISPLAY=:0 \
+            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            /usr/local/bin/xnu_fb_view --fullscreen --size "${FB_W}x${FB_H}" \
+            >"$MNT$MACOS_VIEW_LOG" 2>&1 </dev/null &
+        sleep 0.5
+    else
+        echo "Warning: $MNT/usr/local/bin/xnu_fb_view not found."
+    fi
+
+    # Launch Gunyah + Adreno 850 Venus macOS 27.2 VM detached from caller stdio
+    setsid sh "$MACOS_SCRIPT" >"$MACOS_LOG" 2>&1 </dev/null &
+
+    # Wait up to 8s for crosvm to come up
+    i=0
+    while ! pgrep -x crosvm >/dev/null 2>&1 && [ "$i" -lt 16 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+
+    # Promote viewer & Termux:X11 into Android top-app scheduling group
+    for p in $(pidof xnu_fb_view termux-x11 2>/dev/null); do
+        [ -w /dev/cpuset/top-app/cgroup.procs ] && echo "$p" > /dev/cpuset/top-app/cgroup.procs 2>/dev/null || true
+        [ -w /dev/cpuctl/top-app/cgroup.procs ] && echo "$p" > /dev/cpuctl/top-app/cgroup.procs 2>/dev/null || true
+    done
+
+    VM_PID=$(pgrep -o -x crosvm 2>/dev/null || true)
+    VIEW_PID=$(pgrep -o -x xnu_fb_view 2>/dev/null || true)
+    if [ -n "$VM_PID" ]; then
+        echo "macOS 27.2 VM booting on Gunyah (Adreno 850 Venus, ${FB_W}x${FB_H})"
+        echo "crosvm PID: $VM_PID | xnu_fb_view PID: ${VIEW_PID:-none}"
+        echo "Log: $MACOS_LOG"
+        echo "Display appears in Termux:X11 automatically once XNU completes first swap (~90s)."
+    else
+        echo "Warning: crosvm did not stay running — tailing $MACOS_LOG:"
+        tail -n 20 "$MACOS_LOG" 2>/dev/null || true
+        exit 1
+    fi
+}
+
+do_macos_log() {
+    echo "=== VM Launch Log ($MACOS_LOG) ==="
+    if [ -r "$MACOS_LOG" ]; then
+        tail -n 20 "$MACOS_LOG"
+    else
+        echo "(no VM log yet)"
+    fi
+    echo ""
+    echo "=== XNU dmesg ($MACOS_DIR/xnu-dmesg.log) ==="
+    if [ -r "$MACOS_DIR/xnu-dmesg.log" ]; then
+        tail -n 20 "$MACOS_DIR/xnu-dmesg.log"
+    else
+        echo "(no XNU dmesg yet)"
+    fi
+}
+
 start_vnc_tailscale_proxy() {
     local ts_ip="${1:-$(get_tailscale_ip || true)}"
     pkill -9 -f "TCP-LISTEN:[5]900" 2>/dev/null || true
@@ -593,6 +710,10 @@ do_vnc() {
 
 do_start() {
     do_mount
+    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -f "[r]un-xnulinux-vm.sh" >/dev/null 2>&1; then
+        echo "Stopping running macOS 27 VM before starting Debian Desktop..."
+        do_macos_stop
+    fi
     apply_perf_tweaks
     start_termux_x11
     start_pulseaudio
@@ -660,9 +781,10 @@ do_start() {
 }
 
 do_umount() {
+    do_macos_stop >/dev/null 2>&1 || true
     do_stop
     sleep 0.5
-    for p in "$MNT/mnt/android" "$MNT/tmp/.X11-unix" "$MNT/dev/shm" "$MNT/dev/pts" "$MNT/dev" "$MNT/sys" "$MNT/proc" "$MNT"; do
+    for p in "$MNT/var/xnu-mac" "$MNT/mnt/android" "$MNT/tmp/.X11-unix" "$MNT/dev/shm" "$MNT/dev/pts" "$MNT/dev" "$MNT/sys" "$MNT/proc" "$MNT"; do
         mountpoint -q "$p" && umount -l "$p" 2>/dev/null || true
     done
     echo "Debian GPU chroot unmounted."
@@ -674,6 +796,15 @@ do_status() {
     mountpoint -q "$MNT" && echo "Mount:      $MNT (mounted)" || echo "Mount:      NOT mounted"
     ([ -S "$X11_DIR/X0" ] && pgrep -f "termux.x11" >/dev/null 2>&1) && echo "Termux:X11: running (DISPLAY=:0)" || echo "Termux:X11: stopped"
     pgrep -x xfwm4 >/dev/null 2>&1 && echo "Desktop:    macOS-style XFCE4 + Plank Dock running" || echo "Desktop:    stopped"
+    if pgrep -x crosvm >/dev/null 2>&1; then
+        if grep -q "XnuDisplay: first swap submitted" "$MACOS_DIR/xnu-dmesg.log" 2>/dev/null; then
+            echo "macOS 27:   running (Gunyah + Venus ready)"
+        else
+            echo "macOS 27:   booting (Gunyah + Venus)"
+        fi
+    else
+        echo "macOS 27:   stopped"
+    fi
     pgrep -x pulseaudio >/dev/null 2>&1 && echo "PulseAudio: running (127.0.0.1:4713)" || echo "PulseAudio: stopped"
     pgrep -x x0vncserver >/dev/null 2>&1 && echo "TigerVNC:   running (127.0.0.1:5900${TS_IP:+, $TS_IP:5900})" || echo "TigerVNC:   stopped"
     pgrep -f "websockify.*6080" >/dev/null 2>&1 && echo "noVNC Web:  running (http://127.0.0.1:6080/vnc.html${TS_IP:+, http://$TS_IP:6080/vnc.html})" || echo "noVNC Web:  stopped"
@@ -686,6 +817,15 @@ do_telemetry() {
     ([ -S "$X11_DIR/X0" ] || [ -S "$MNT/tmp/.X11-unix/X0" ] || ss -xl 2>/dev/null | grep -q 'X11-unix/X0') && (pgrep -f 'termux.x11' >/dev/null 2>&1 || ss -xl 2>/dev/null | grep -q 'X11-unix/X0') && echo "X11=1" || echo "X11=0"
     pgrep -x xfwm4 >/dev/null 2>&1 && echo "DESKTOP=1" || echo "DESKTOP=0"
     pgrep -x plank >/dev/null 2>&1 && echo "PLANK=1" || echo "PLANK=0"
+    [ -x "$MACOS_SCRIPT" ] && echo "MACOS_AVAIL=1" || echo "MACOS_AVAIL=0"
+    if pgrep -x crosvm >/dev/null 2>&1; then
+        echo "MACOS_VM=1"
+        grep -q "XnuDisplay: first swap submitted" "$MACOS_DIR/xnu-dmesg.log" 2>/dev/null && echo "MACOS_READY=1" || echo "MACOS_READY=0"
+    else
+        echo "MACOS_VM=0"
+        echo "MACOS_READY=0"
+    fi
+    pgrep -x xnu_fb_view >/dev/null 2>&1 && echo "MACOS_VIEW=1" || echo "MACOS_VIEW=0"
     (pgrep -x x0vncserver >/dev/null 2>&1 || pgrep -x X0tigervnc >/dev/null 2>&1) && echo "VNC=1" || echo "VNC=0"
     pgrep -f 'websockify.*6080' >/dev/null 2>&1 && echo "NOVNC=1" || echo "NOVNC=0"
     if pgrep -x pulseaudio >/dev/null 2>&1; then
@@ -761,18 +901,21 @@ do_telemetry() {
 }
 
 case "${1:-status}" in
-    start)      do_start ;;
-    stop)       do_stop ;;
-    umount)     do_umount ;;
-    status)     do_status ;;
-    vnc)        do_vnc ;;
-    perf)       apply_perf_tweaks; echo "Perf tweaks applied." ;;
-    boot-apply) apply_perf_tweaks ;;
-    set-toggle) do_set_toggle "${2:-}" "${3:-}" ;;
-    reset-perf) do_reset_perf ;;
-    audio-fix)  PERF_PULSEAUDIO=1; start_pulseaudio; echo "PulseAudio AAudio_sink ready." ;;
-    audio-stop) stop_pulseaudio; echo "PulseAudio stopped." ;;
-    telemetry)  do_telemetry ;;
+    start)       do_start ;;
+    stop)        do_stop ;;
+    macos-start) do_macos_start ;;
+    macos-stop)  do_macos_stop ;;
+    macos-log)   do_macos_log ;;
+    umount)      do_umount ;;
+    status)      do_status ;;
+    vnc)         do_vnc ;;
+    perf)        apply_perf_tweaks; echo "Perf tweaks applied." ;;
+    boot-apply)  apply_perf_tweaks ;;
+    set-toggle)  do_set_toggle "${2:-}" "${3:-}" ;;
+    reset-perf)  do_reset_perf ;;
+    audio-fix)   PERF_PULSEAUDIO=1; start_pulseaudio; echo "PulseAudio AAudio_sink ready." ;;
+    audio-stop)  stop_pulseaudio; echo "PulseAudio stopped." ;;
+    telemetry)   do_telemetry ;;
     shell)
         do_mount
         exec chroot "$MNT" /usr/bin/env -i \
@@ -791,7 +934,7 @@ case "${1:-status}" in
         do_start
         ;;
     *)
-        echo "Usage: $0 {start|stop|umount|shell|status|vnc|perf|set-toggle|reset-perf|audio-fix|audio-stop|telemetry|passwd}" >&2
+        echo "Usage: $0 {start|stop|macos-start|macos-stop|macos-log|umount|shell|status|vnc|perf|set-toggle|reset-perf|audio-fix|audio-stop|telemetry|passwd}" >&2
         exit 1
         ;;
 esac
