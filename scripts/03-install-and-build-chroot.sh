@@ -41,12 +41,13 @@ apt-get install -y -q --no-install-recommends \
     xfce4-session xfce4-panel xfwm4 xfdesktop4 xfce4-settings xfconf \
     xfce4-whiskermenu-plugin xfce4-genmon-plugin xfce4-terminal \
     thunar mousepad xfce4-taskmanager xfce4-notifyd \
-    plank dconf-cli kitty rofi \
+    plank dconf-cli libglib2.0-bin gsettings-desktop-schemas \
+    xdg-desktop-portal xdg-desktop-portal-gtk kitty rofi \
     gnome-themes-extra adwaita-icon-theme papirus-icon-theme \
     fonts-cantarell fonts-jetbrains-mono fonts-dejavu librsvg2-common \
     mesa-utils vulkan-tools glmark2-x11 \
     libgl1-mesa-dri libegl-mesa0 libglx-mesa0 mesa-vulkan-drivers \
-    tigervnc-scraping-server tigervnc-tools novnc python3-websockify \
+    tigervnc-scraping-server tigervnc-tools novnc python3-websockify socat \
     build-essential meson ninja-build pkg-config bison flex \
     python3-mako python3-yaml python3-packaging glslang-tools \
     libdrm-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri3-dev \

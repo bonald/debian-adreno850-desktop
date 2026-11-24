@@ -23,13 +23,15 @@ CFG="$H/.config/xfce4/xfconf/xfce-perchannel-xml"
 PNL="$H/.config/xfce4/panel"
 TERM_CFG="$H/.config/xfce4/terminal"
 GTK3="$H/.config/gtk-3.0"
+GTK4="$H/.config/gtk-4.0"
+PORTAL_CFG="$H/.config/xdg-desktop-portal"
 BG_DIR="$H/.local/share/backgrounds"
 XFWM_THEME="$H/.local/share/themes/MacOS-Dark/xfwm4"
 PLANK_THEME="$H/.local/share/plank/themes/MacOS-Dark"
 PLANK_LAUNCHERS="$H/.config/plank/dock1/launchers"
 APPS_DIR="$H/.local/share/applications"
 
-mkdir -p "$CFG" "$PNL" "$TERM_CFG" "$GTK3" "$BG_DIR" "$XFWM_THEME" "$PLANK_THEME" "$PLANK_LAUNCHERS" "$APPS_DIR" "$H/.local/bin" "$H/.config/autostart"
+mkdir -p "$CFG" "$PNL" "$TERM_CFG" "$GTK3" "$GTK4" "$PORTAL_CFG" "$BG_DIR" "$XFWM_THEME" "$PLANK_THEME" "$PLANK_LAUNCHERS" "$APPS_DIR" "$H/.local/bin" "$H/.config/autostart"
 
 # 1. Generate dusk wallpaper + crisp 4x supersampled macOS traffic-light xfwm4 theme via Pillow
 BG_PATH="$BG_DIR/macos-dark.png" XFWM_DIR="$XFWM_THEME" python3 - << 'PYEOF'
@@ -230,14 +232,22 @@ printf "<txt>  ${GPU_LABEL}   CPU %s   RAM %s  </txt>" "\$CPU" "\$RAM"
 EOF
 chmod 755 "$H/.local/bin/topbar-stats.sh"
 
-# 6. GTK3 + Top Bar CSS
-cat << 'EOF' > "$GTK3/settings.ini"
+# 6. GTK3 + GTK4 + XDG Desktop Portal + Top Bar CSS (system-wide dark mode)
+for gtkdir in "$GTK3" "$GTK4"; do
+    cat << 'EOF' > "$gtkdir/settings.ini"
 [Settings]
 gtk-theme-name=Adwaita-dark
 gtk-icon-theme-name=Papirus-Dark
 gtk-font-name=Cantarell 10.5
 gtk-application-prefer-dark-theme=1
+gtk-cursor-theme-name=Adwaita
 gtk-cursor-theme-size=24
+EOF
+done
+
+cat << 'EOF' > "$PORTAL_CFG/portals.conf"
+[preferred]
+default=gtk
 EOF
 
 cat << 'EOF' > "$GTK3/gtk.css"
@@ -430,12 +440,21 @@ ColorPalette=#1a1b24;#ff5f56;#27c93f;#ffbd2e;#3584e4;#bb9af7;#7dcfff;#deddda;#5e
 ScrollingLines=10000
 EOF
 
-# 10. Autostart Plank dock inside XFCE4
+# 10. Autostart Plank dock and XDG Desktop Portal (FreeDesktop prefer-dark) inside XFCE4
 cat << 'EOF' > "$H/.config/autostart/plank.desktop"
 [Desktop Entry]
 Type=Application
 Name=Plank Dock
 Exec=plank
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true
+EOF
+
+cat << 'EOF' > "$H/.config/autostart/xdg-desktop-portal.desktop"
+[Desktop Entry]
+Type=Application
+Name=XDG Desktop Portal (Dark Theme)
+Exec=/bin/sh -c "XDG_CURRENT_DESKTOP=XFCE /usr/libexec/xdg-desktop-portal-gtk >/tmp/portal-gtk.log 2>&1 & sleep 0.5; XDG_CURRENT_DESKTOP=XFCE /usr/libexec/xdg-desktop-portal >/tmp/portal.log 2>&1 &"
 OnlyShowIn=XFCE;
 X-GNOME-Autostart-enabled=true
 EOF
@@ -459,9 +478,12 @@ EOF
 
 chown -R "${USER_UID}:${USER_GID}" "$H/.config" "$H/.local"
 
-# 12. Apply Plank dconf settings (MacOS-Dark theme, 44px icons, 145% hover zoom, bottom-center)
-apply_plank_gsettings() {
+# 12. Apply Plank + FreeDesktop/GNOME dark-mode dconf settings
+apply_desktop_gsettings() {
     dbus-run-session -- bash -c '
+        gsettings set org.gnome.desktop.interface color-scheme "prefer-dark"
+        gsettings set org.gnome.desktop.interface gtk-theme "Adwaita-dark"
+        gsettings set org.gnome.desktop.interface icon-theme "Papirus-Dark"
         gsettings set net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/ theme "MacOS-Dark"
         gsettings set net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/ icon-size 44
         gsettings set net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock1/ zoom-enabled true
@@ -473,9 +495,9 @@ apply_plank_gsettings() {
 }
 
 if [ "$(id -u)" -eq 0 ]; then
-    su - "$DESKTOP_USER" -c "$(declare -f apply_plank_gsettings); apply_plank_gsettings"
+    su - "$DESKTOP_USER" -c "$(declare -f apply_desktop_gsettings); apply_desktop_gsettings"
 else
-    apply_plank_gsettings
+    apply_desktop_gsettings
 fi
 
 echo "macOS-style XFCE4 + Plank desktop configured for user '${DESKTOP_USER}'."

@@ -12,6 +12,7 @@
 #   su -c "/data/adb/debian-gpu.sh umount"  - Stop services and unmount chroot image
 #   su -c "/data/adb/debian-gpu.sh shell"   - Interactive bash shell as droid
 #   su -c "/data/adb/debian-gpu.sh status"  - Show running services & remote URLs
+#   su -c "/data/adb/debian-gpu.sh vnc"     - Restart TigerVNC + noVNC + Tailscale proxy only
 #   su -c "/data/adb/debian-gpu.sh passwd"  - Change VNC password
 #   su -c "/data/adb/debian-gpu.sh verify"  - Verify Vulkan 1.4 / OpenGL 4.6 / CPU inside chroot
 
@@ -97,12 +98,13 @@ kill_desktop_procs() {
         for p in x0vncserver X0tigervnc xfce4-session xfwm4 xfce4-panel xfdesktop xfsettingsd xfconfd plank; do
             pkill -9 -x \"\$p\" 2>/dev/null || true
         done
-        pkill -9 -f 'websockify.*6080' 2>/dev/null || true
-        pkill -9 -f 'dbus-run-session -- startxfce4' 2>/dev/null || true
+        pkill -9 -f '[w]ebsockify.*6080' 2>/dev/null || true
+        pkill -9 -f '[d]bus-run-session -- startxfce4' 2>/dev/null || true
+        pkill -9 -f '[x]dg-desktop-portal' 2>/dev/null || true
         rm -rf '/home/${DESKTOP_USER}/.cache/sessions' 2>/dev/null || true
     " || true
-    pkill -9 -f "TCP-LISTEN:5900" 2>/dev/null || true
-    pkill -9 -f "TCP-LISTEN:6080" 2>/dev/null || true
+    pkill -9 -f "TCP-LISTEN:[5]900" 2>/dev/null || true
+    pkill -9 -f "TCP-LISTEN:[6]080" 2>/dev/null || true
 }
 
 do_stop() {
@@ -110,6 +112,45 @@ do_stop() {
         kill_desktop_procs
     fi
     echo "Debian GPU desktop & remote X stopped."
+}
+
+start_vnc_tailscale_proxy() {
+    ts_ip="${1:-$(get_tailscale_ip || true)}"
+    pkill -9 -f "TCP-LISTEN:[5]900" 2>/dev/null || true
+    pkill -9 -f "TCP-LISTEN:[6]080" 2>/dev/null || true
+    [ -z "$ts_ip" ] && return 0
+    if [ -x "$MNT/usr/bin/socat" ]; then
+        run_in_chroot "setsid /usr/bin/socat 'TCP-LISTEN:5900,bind=$ts_ip,reuseaddr,fork,nodelay' TCP:127.0.0.1:5900 >/tmp/socat-5900.log 2>&1 </dev/null &"
+        run_in_chroot "setsid /usr/bin/socat 'TCP-LISTEN:6080,bind=$ts_ip,reuseaddr,fork,nodelay' TCP:127.0.0.1:6080 >/tmp/socat-6080.log 2>&1 </dev/null &"
+    elif [ -x "$TPREFIX/bin/socat" ]; then
+        LD_LIBRARY_PATH="$TPREFIX/lib" nohup "$TPREFIX/bin/socat" "TCP-LISTEN:5900,bind=$ts_ip,reuseaddr,fork,nodelay" TCP:127.0.0.1:5900 >/dev/null 2>&1 </dev/null &
+        LD_LIBRARY_PATH="$TPREFIX/lib" nohup "$TPREFIX/bin/socat" "TCP-LISTEN:6080,bind=$ts_ip,reuseaddr,fork,nodelay" TCP:127.0.0.1:6080 >/dev/null 2>&1 </dev/null &
+    fi
+}
+
+do_vnc() {
+    do_mount
+    TS_IP="$(get_tailscale_ip || true)"
+    pkill -9 -x x0vncserver 2>/dev/null || true
+    pkill -9 -x X0tigervnc 2>/dev/null || true
+    pkill -9 -f "[w]ebsockify.*6080" 2>/dev/null || true
+    sleep 0.3
+    run_in_chroot "
+        su - '${DESKTOP_USER}' -c '
+            export DISPLAY=:0
+            if [ ! -f ~/.vnc/passwd ]; then
+                mkdir -p ~/.vnc
+                printf \"%s\n\" debian-gpu | vncpasswd -f > ~/.vnc/passwd
+                chmod 600 ~/.vnc/passwd
+            fi
+            setsid x0vncserver -display :0 -interface 127.0.0.1 -rfbport 5900 -PasswordFile ~/.vnc/passwd -UseSHM=0 >/tmp/x0vnc.log 2>&1 </dev/null &
+            setsid websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900 >/tmp/novnc.log 2>&1 </dev/null &
+        '
+    "
+    sleep 1
+    start_vnc_tailscale_proxy "$TS_IP"
+    sleep 0.5
+    do_status
 }
 
 do_start() {
@@ -130,6 +171,8 @@ do_start() {
             export TU_DEBUG=noconform,noubwc
             export MESA_VK_WSI_DEBUG=sw
             export QT_X11_NO_MITSHM=1
+            export GTK_THEME=Adwaita:dark
+            export QT_QPA_PLATFORMTHEME=gtk3
             nohup dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 </dev/null &
         '
     "
@@ -166,10 +209,7 @@ do_start() {
     sleep 1
 
     # Expose VNC (5900) and noVNC (6080) ONLY on Tailscale IP (never public Wi-Fi)
-    if [ -n "$TS_IP" ] && [ -x "$TPREFIX/bin/socat" ]; then
-        nohup "$TPREFIX/bin/socat" "TCP-LISTEN:5900,bind=$TS_IP,reuseaddr,fork,nodelay" TCP:127.0.0.1:5900 >/dev/null 2>&1 </dev/null &
-        nohup "$TPREFIX/bin/socat" "TCP-LISTEN:6080,bind=$TS_IP,reuseaddr,fork,nodelay" TCP:127.0.0.1:6080 >/dev/null 2>&1 </dev/null &
-    fi
+    start_vnc_tailscale_proxy "$TS_IP"
 
     do_status
 }
@@ -198,6 +238,7 @@ case "${1:-status}" in
     stop)   do_stop ;;
     umount) do_umount ;;
     status) do_status ;;
+    vnc)    do_vnc ;;
     shell)
         do_mount
         exec chroot "$MNT" /usr/bin/env -i \
@@ -206,6 +247,7 @@ case "${1:-status}" in
             VK_ICD_FILENAMES=/opt/turnip-a850/share/vulkan/icd.d/freedreno_icd.aarch64.json \
             MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink \
             TU_DEBUG=noconform,noubwc MESA_VK_WSI_DEBUG=sw QT_X11_NO_MITSHM=1 \
+            GTK_THEME=Adwaita:dark QT_QPA_PLATFORMTHEME=gtk3 \
             PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             /bin/su -p "${DESKTOP_USER}"
         ;;
@@ -213,7 +255,7 @@ case "${1:-status}" in
         do_mount
         chroot "$MNT" /bin/su - "${DESKTOP_USER}" -c "mkdir -p ~/.vnc && vncpasswd ~/.vnc/passwd && chmod 600 ~/.vnc/passwd"
         echo "Restarting VNC to use new password..."
-        do_start
+        do_vnc
         ;;
     verify)
         do_mount
@@ -221,7 +263,7 @@ case "${1:-status}" in
         chroot "$MNT" /bin/su - "${DESKTOP_USER}" -c "/usr/local/bin/verify-gpu $*"
         ;;
     *)
-        echo "Usage: $0 {start|stop|umount|shell|status|passwd|verify [--bench]}" >&2
+        echo "Usage: $0 {start|stop|umount|shell|status|vnc|passwd|verify [--bench]}" >&2
         exit 1
         ;;
 esac

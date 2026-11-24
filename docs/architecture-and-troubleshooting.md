@@ -25,6 +25,7 @@
 | No GLX `picom` compositor | Using `picom --backend glx` on Termux:X11 with `MESA_VK_WSI_DEBUG=sw` results in a black screen because `GLX_EXT_texture_from_pixmap` does not composite properly over the sw-WSI X11 bridge. `xfwm4`'s built-in XRender compositor gives crisp window shadows, dock transparency, and zero black screens while GPU apps still render directly on Turnip + Zink. |
 | `aid_inet` (GID 3003) & `aid_net_raw` (GID 3004) | Android's `CONFIG_ANDROID_PARANOID_NETWORK` kernel feature restricts socket creation to processes in GID 3003/3004. Adding `root` and `droid` to those groups makes `apt`, `curl`, `ssh`, and browsers work normally inside the chroot. |
 | `APT::Sandbox::User "root";` | Inside an Android kernel chroot, `_apt` is not in `aid_inet` (3003), causing `apt-get update` network calls to fail with `Permission denied` unless sandboxing runs as `root`. |
+| `xdg-desktop-portal-gtk` + `color-scheme='prefer-dark'` | GTK4/libadwaita, Chromium, and Electron apps query the FreeDesktop portal (`org.freedesktop.appearance` `color-scheme`) rather than only reading GTK3 `settings.ini`. Autostarting `xdg-desktop-portal-gtk` with `XDG_CURRENT_DESKTOP=XFCE` and setting `gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'` makes all modern toolkits follow dark mode (for Electron/Chromium wrappers, you can also pass `--force-dark-mode`). |
 
 ---
 

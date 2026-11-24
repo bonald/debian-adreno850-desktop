@@ -16,4 +16,8 @@ export MESA_VK_WSI_DEBUG="${MESA_VK_WSI_DEBUG:-sw}"
 # Android kernels disable CONFIG_SYSVIPC
 export QT_X11_NO_MITSHM=1
 
+# System-wide dark mode for GTK3/GTK4/Qt apps
+export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
+export QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-gtk3}"
+
 export DISPLAY="${DISPLAY:-:0}"

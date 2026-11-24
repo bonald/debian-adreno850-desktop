@@ -14,6 +14,7 @@ Run a full native **Debian 13 (`trixie`, `arm64`)** glibc Linux desktop on a roo
   - Slim translucent dark top bar (Debian Whisker Menu + active window menu on left; live GPU/CPU/RAM badge, systray, and clock on right).
   - Centered frosted-glass floating dock (**Plank**) with 145% hover zoom, running-app dots, and a 9-dot App Grid launcher.
   - Custom `MacOS-Dark` `xfwm4` window theme with 4x supersampled red/yellow/green traffic-light buttons on the top-left and a generated dark dusk wallpaper.
+  - **System-wide dark mode** across GTK3, GTK4/libadwaita, Qt, Chromium, and Electron via `xdg-desktop-portal-gtk` (`org.freedesktop.appearance` `color-scheme = prefer-dark`), `GTK_THEME=Adwaita:dark`, and `QT_QPA_PLATFORMTHEME=gtk3`.
 - **Local & remote display**:
   - On-device (and USB-C to DisplayPort external monitor) via **Termux:X11** (`DISPLAY=:0`).
   - Remote desktop via **TigerVNC** (`x0vncserver`, port `5900`) and **noVNC** browser client (port `6080`), bound strictly to `127.0.0.1` and your **Tailscale** IP (never public Wi-Fi).
@@ -227,6 +228,8 @@ export GALLIUM_DRIVER=zink
 export TU_DEBUG="${TU_DEBUG:-noconform,noubwc}"
 export MESA_VK_WSI_DEBUG="${MESA_VK_WSI_DEBUG:-sw}"
 export QT_X11_NO_MITSHM=1
+export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
+export QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-gtk3}"
 export DISPLAY="${DISPLAY:-:0}"
 ```
 
@@ -281,6 +284,7 @@ su -c "/data/adb/debian-gpu.sh status"        # Check service status and print T
 su -c "/data/adb/debian-gpu.sh shell"         # Open interactive Debian shell as user 'droid'
 su -c "/data/adb/debian-gpu.sh verify"        # Verify Vulkan 1.4, OpenGL 4.6, and CPU info
 su -c "/data/adb/debian-gpu.sh verify --bench" # Also run 720p glmark2 offscreen benchmark
+su -c "/data/adb/debian-gpu.sh vnc"           # Restart VNC/noVNC & Tailscale proxy without closing apps
 su -c "/data/adb/debian-gpu.sh passwd"        # Change VNC password and restart VNC
 su -c "/data/adb/debian-gpu.sh stop"          # Stop desktop, VNC, and noVNC
 su -c "/data/adb/debian-gpu.sh umount"        # Stop everything and cleanly unmount the ext4 image
