@@ -568,7 +568,7 @@ ensure_macos_bind() {
 
 do_macos_stop() {
     pkill -TERM -x xnu_fb_view 2>/dev/null || true
-    pkill -TERM -f "[r]un-xnulinux-vm.sh" 2>/dev/null || true
+    pkill -TERM -f "^sh /data/adb/run-xnulinux-vm\\.sh" 2>/dev/null || true
     pkill -TERM -x crosvm 2>/dev/null || true
     i=0
     while (pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1) && [ "$i" -lt 10 ]; do
@@ -576,7 +576,7 @@ do_macos_stop() {
         i=$((i + 1))
     done
     pkill -KILL -x xnu_fb_view 2>/dev/null || true
-    pkill -KILL -f "[r]un-xnulinux-vm.sh" 2>/dev/null || true
+    pkill -KILL -f "^sh /data/adb/run-xnulinux-vm\\.sh" 2>/dev/null || true
     pkill -KILL -x crosvm 2>/dev/null || true
     if [ -r /sys/power/wake_lock ] && [ -w /sys/power/wake_unlock ]; then
         for wl in $(tr ' ' '\n' < /sys/power/wake_lock 2>/dev/null | grep '^xnulinux_vm_' || true); do
@@ -601,9 +601,13 @@ do_macos_start() {
         echo "Stopping Debian XFCE4 desktop before starting macOS 27..."
         kill_desktop_procs
     fi
-    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -f "[r]un-xnulinux-vm.sh" >/dev/null 2>&1; then
+    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -f "^sh /data/adb/run-xnulinux-vm\\.sh" >/dev/null 2>&1; then
         do_macos_stop >/dev/null 2>&1 || true
     fi
+    # Evict idle cached Android apps & drop page cache so Gunyah --hugepages gets clean 2MB folios
+    am kill-all >/dev/null 2>&1 || true
+    sync
+    (echo 3 > /proc/sys/vm/drop_caches) 2>/dev/null || true
     sleep 0.5
 
     # Reset XNU dmesg log so readiness reflects this boot
