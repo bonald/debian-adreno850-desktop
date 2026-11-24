@@ -187,7 +187,7 @@ public class MainActivity extends Activity {
         titleLine.addView(title);
 
         TextView verPill = new TextView(this);
-        verPill.setText("v2.1");
+        verPill.setText("v2.2");
         verPill.setTextColor(Color.parseColor("#7DCFFF"));
         verPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         verPill.setTypeface(Typeface.DEFAULT_BOLD);
@@ -314,8 +314,10 @@ public class MainActivity extends Activity {
                 "Wake at 951 MHz (pwrlevel 7) + 500ms idle timer (prevents 222 MHz drops)");
         addToggleRow(perfCard, "PERF_GPU_MAX_WAKE", "GPU Max Wake (Docked)",
                 "Wake directly at 1450 MHz (pwrlevel 0) for zero ramp lag when plugged in");
-        addToggleRow(perfCard, "PERF_CPU_UNLOCK", "Unlock CPU Max Clocks",
-                "Raises msm_performance & scaling_max_freq to 3.74 / 4.03 / 5.01 GHz");
+        addToggleRow(perfCard, "PERF_CPU_UNLOCK", "Unlock 8 Cores & Disable FAS Cap",
+                "Keeps all 8 cores active (core_ctl), disables honor_fas 2.4 GHz clamp, 5.01 GHz max");
+        addToggleRow(perfCard, "PERF_THERMAL_DOCKED", "Docked Thermal Mode (No 40°C Cap)",
+                "Pauses dubaid & skin cooling_switch (keeps iawareperf UI boost & HW 105°C LMh safe)");
         addToggleRow(perfCard, "PERF_WALT_BURST", "WALT CPU Burst Tuning",
                 "hispeed_load=70, predictive load (pl=1), higher hispeed freqs (2.19/2.65/3.57 GHz)");
         addToggleRow(perfCard, "PERF_VM_IO", "RAM & Chroot Disk I/O Tuning",
@@ -855,14 +857,20 @@ public class MainActivity extends Activity {
         final long c0Cur = parseLongSafe(m.get("CPU0_CUR"), 0);
         final long c0Max = parseLongSafe(m.get("CPU0_MAX"), 3744000);
         final long c0Hw = Math.max(1, parseLongSafe(m.get("CPU0_HW"), 3744000));
+        final String c0Act = m.getOrDefault("CPU0_ACT", "3");
 
         final long c3Cur = parseLongSafe(m.get("CPU3_CUR"), 0);
         final long c3Max = parseLongSafe(m.get("CPU3_MAX"), 4032000);
         final long c3Hw = Math.max(1, parseLongSafe(m.get("CPU3_HW"), 4032000));
+        final String c3Act = m.getOrDefault("CPU3_ACT", "3");
 
         final long c6Cur = parseLongSafe(m.get("CPU6_CUR"), 0);
         final long c6Max = parseLongSafe(m.get("CPU6_MAX"), 5011200);
         final long c6Hw = Math.max(1, parseLongSafe(m.get("CPU6_HW"), 5011200));
+        final String c6Act = m.getOrDefault("CPU6_ACT", "2");
+
+        final String fasEn = m.getOrDefault("FAS_EN", "?");
+        final String dubaiSvc = m.getOrDefault("DUBAID_SVC", "?");
 
         final long gpuCur = parseLongSafe(m.get("GPU_CUR"), 0);
         final long gpuMax = Math.max(1, parseLongSafe(m.get("GPU_MAX"), 1450));
@@ -902,24 +910,24 @@ public class MainActivity extends Activity {
             int infoFg = Color.parseColor("#7DCFFF");
 
             // Update CPU & GPU live meters
-            boolean c0Capped = c0Max < (c0Hw - 100000);
-            boolean c3Capped = c3Max < (c3Hw - 100000);
-            boolean c6Capped = c6Max < (c6Hw - 100000);
+            boolean c0Capped = c0Max < (c0Hw - 100000) || "0".equals(c0Act);
+            boolean c3Capped = c3Max < (c3Hw - 100000) || "0".equals(c3Act);
+            boolean c6Capped = c6Max < (c6Hw - 100000) || "0".equals(c6Act);
 
             updateMeter(meterCpu0,
-                    fmtGhz(c0Cur) + " / " + fmtGhz(c0Max) + " GHz" + (c0Capped ? " (cap<" + fmtGhz(c0Hw) + ")" : ""),
+                    "[" + c0Act + "/3] " + fmtGhz(c0Cur) + " / " + fmtGhz(c0Max) + " GHz",
                     (float) c0Cur / c0Hw,
                     c0Capped ? COL_AMBER : COL_BLUE,
                     c0Capped ? warnFg : Color.parseColor("#A9B1D6"));
 
             updateMeter(meterCpu3,
-                    fmtGhz(c3Cur) + " / " + fmtGhz(c3Max) + " GHz" + (c3Capped ? " (cap<" + fmtGhz(c3Hw) + ")" : ""),
+                    "[" + c3Act + "/3] " + fmtGhz(c3Cur) + " / " + fmtGhz(c3Max) + " GHz",
                     (float) c3Cur / c3Hw,
                     c3Capped ? COL_AMBER : COL_CYAN,
                     c3Capped ? warnFg : Color.parseColor("#A9B1D6"));
 
             updateMeter(meterCpu6,
-                    fmtGhz(c6Cur) + " / " + fmtGhz(c6Max) + " GHz" + (c6Capped ? " (cap<" + fmtGhz(c6Hw) + ")" : ""),
+                    "[" + c6Act + "/2] " + fmtGhz(c6Cur) + " / " + fmtGhz(c6Max) + " GHz",
                     (float) c6Cur / c6Hw,
                     c6Capped ? COL_AMBER : COL_PURPLE,
                     c6Capped ? warnFg : Color.parseColor("#A9B1D6"));
@@ -942,7 +950,8 @@ public class MainActivity extends Activity {
             String modeLabel = "4".equals(honorMode) ? "Performance"
                     : "1".equals(honorMode) ? "Normal"
                     : "3".equals(honorMode) ? "PowerSave" : honorMode;
-            tvPowerLine.setText("Battery " + bCap + "% (" + bTemp + "°C, " + bStat + ") · Honor: " + modeLabel);
+            tvPowerLine.setText("Battery " + bCap + "% (" + bTemp + "°C, " + bStat + ") · Honor: " + modeLabel
+                    + " · FAS:" + ("0".equals(fasEn) ? "off" : "on") + " · dubaid:" + ("stopped".equals(dubaiSvc) ? "paused" : "on"));
             tvMemLine.setText("RAM " + memUsed + "/" + memTot + " MB · ZRAM " + swpUsed + "/" + swpTot
                     + " MB · swp=" + swappiness + " · RA=" + loopRa + "K · THP=" + thpDefrag);
 

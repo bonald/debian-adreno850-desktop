@@ -37,6 +37,7 @@ PERF_GPU_UNLOCK=1
 PERF_GPU_RAMP=1
 PERF_GPU_MAX_WAKE=0
 PERF_CPU_UNLOCK=1
+PERF_THERMAL_DOCKED=1
 PERF_WALT_BURST=1
 PERF_VM_IO=1
 PERF_THP_OPT=1
@@ -56,6 +57,7 @@ load_conf() {
     PERF_GPU_RAMP=1
     PERF_GPU_MAX_WAKE=0
     PERF_CPU_UNLOCK=1
+    PERF_THERMAL_DOCKED=1
     PERF_WALT_BURST=1
     PERF_VM_IO=1
     PERF_THP_OPT=1
@@ -235,8 +237,19 @@ apply_perf_tweaks() {
         (echo 80 > /sys/class/kgsl/kgsl-3d0/idle_timer) 2>/dev/null || true
     fi
 
-    # 4. CPU max frequency unlock (keeps dubaid & iawareperf running for smooth UI)
+    # 4. CPU max frequency, honor_fas burst cap & core_ctl 8-core unlock
     if [ "$PERF_CPU_UNLOCK" = "1" ]; then
+        # Disable honor_fas 2.18/2.42 GHz frame-aware burst clamp (keeps iawareperf running!)
+        (echo 0 > /sys/kernel/fas/mgr/fas_enable) 2>/dev/null || true
+        # Unlock core_ctl so Prime cores (cpu6-7) & Big cores (cpu3-5) stay active
+        (echo 3 > /sys/devices/system/cpu/cpu0/core_ctl/max_cpus) 2>/dev/null || true
+        (echo 3 > /sys/devices/system/cpu/cpu0/core_ctl/min_cpus) 2>/dev/null || true
+        (echo 3 > /sys/devices/system/cpu/cpu3/core_ctl/max_cpus) 2>/dev/null || true
+        (echo 3 > /sys/devices/system/cpu/cpu3/core_ctl/min_cpus) 2>/dev/null || true
+        (echo 0 > /sys/devices/system/cpu/cpu3/core_ctl/enable) 2>/dev/null || true
+        (echo 2 > /sys/devices/system/cpu/cpu6/core_ctl/max_cpus) 2>/dev/null || true
+        (echo 2 > /sys/devices/system/cpu/cpu6/core_ctl/min_cpus) 2>/dev/null || true
+        (echo 0 > /sys/devices/system/cpu/cpu6/core_ctl/enable) 2>/dev/null || true
         chmod 644 /sys/kernel/msm_performance/parameters/cpu_max_freq 2>/dev/null || true
         (echo "0:3744000 1:3744000 2:3744000 3:4032000 4:4032000 5:4032000 6:5011200 7:5011200" \
             > /sys/kernel/msm_performance/parameters/cpu_max_freq) 2>/dev/null || true
@@ -245,6 +258,31 @@ apply_perf_tweaks() {
             hw=$(cat "/sys/devices/system/cpu/cpufreq/policy$p/cpuinfo_max_freq" 2>/dev/null || true)
             [ -n "$hw" ] && (echo "$hw" > "/sys/devices/system/cpu/cpufreq/policy$p/scaling_max_freq") 2>/dev/null || true
         done
+    else
+        (echo 1 > /sys/kernel/fas/mgr/fas_enable) 2>/dev/null || true
+        (echo 1 > /sys/devices/system/cpu/cpu3/core_ctl/enable) 2>/dev/null || true
+        (echo 0 > /sys/devices/system/cpu/cpu3/core_ctl/min_cpus) 2>/dev/null || true
+        (echo 1 > /sys/devices/system/cpu/cpu6/core_ctl/enable) 2>/dev/null || true
+        (echo 0 > /sys/devices/system/cpu/cpu6/core_ctl/min_cpus) 2>/dev/null || true
+    fi
+
+    # 4b. Docked Thermal Mode: pause Honor 40C skin-temp daemon (dubaid) & hn_thermal cooling_switch
+    # Keeps vendor.honor.hardware.iawareperf running (smooth UI) and HW CPUCP/LMh + TSENS (105-125C) active!
+    if [ "$PERF_THERMAL_DOCKED" = "1" ]; then
+        (echo 0 > /sys/class/hn_thermal/cooling/cooling_switch) 2>/dev/null || true
+        stop dubaid 2>/dev/null || true
+        # Re-clear any cap dubaid wrote right before stopping
+        if [ "$PERF_CPU_UNLOCK" = "1" ]; then
+            (echo "0:3744000 1:3744000 2:3744000 3:4032000 4:4032000 5:4032000 6:5011200 7:5011200" \
+                > /sys/kernel/msm_performance/parameters/cpu_max_freq) 2>/dev/null || true
+            for p in 0 3 6; do
+                hw=$(cat "/sys/devices/system/cpu/cpufreq/policy$p/cpuinfo_max_freq" 2>/dev/null || true)
+                [ -n "$hw" ] && (echo "$hw" > "/sys/devices/system/cpu/cpufreq/policy$p/scaling_max_freq") 2>/dev/null || true
+            done
+        fi
+    else
+        (echo 1 > /sys/class/hn_thermal/cooling/cooling_switch) 2>/dev/null || true
+        start dubaid 2>/dev/null || true
     fi
 
     # 5. WALT CPU governor burst tuning
@@ -342,7 +380,7 @@ do_set_toggle() {
     KEY="${1:-}"
     VAL="${2:-}"
     case "$KEY" in
-        PERF_HONOR_MODE|PERF_GPU_UNLOCK|PERF_GPU_RAMP|PERF_GPU_MAX_WAKE|PERF_CPU_UNLOCK|PERF_WALT_BURST|PERF_VM_IO|PERF_THP_OPT|PERF_JEMALLOC|PERF_XFCE_OPT|PERF_CHROMIUM_VULKAN|PERF_PULSEAUDIO|PERF_BOOT_PERSIST)
+        PERF_HONOR_MODE|PERF_GPU_UNLOCK|PERF_GPU_RAMP|PERF_GPU_MAX_WAKE|PERF_CPU_UNLOCK|PERF_THERMAL_DOCKED|PERF_WALT_BURST|PERF_VM_IO|PERF_THP_OPT|PERF_JEMALLOC|PERF_XFCE_OPT|PERF_CHROMIUM_VULKAN|PERF_PULSEAUDIO|PERF_BOOT_PERSIST)
             ;;
         *)
             echo "Unknown toggle key: $KEY" >&2
@@ -394,6 +432,7 @@ PERF_GPU_UNLOCK=0
 PERF_GPU_RAMP=0
 PERF_GPU_MAX_WAKE=0
 PERF_CPU_UNLOCK=0
+PERF_THERMAL_DOCKED=0
 PERF_WALT_BURST=0
 PERF_VM_IO=0
 PERF_THP_OPT=0
@@ -596,12 +635,16 @@ do_telemetry() {
     echo "TS=$(get_tailscale_ip || true)"
     echo "DISK=$(df -h "$MNT" 2>/dev/null | awk 'NR==2{print $3" / "$2" ("$5")"}')"
 
-    # CPU cluster frequencies (kHz)
+    # CPU cluster frequencies (kHz) & core_ctl active core count
     for p in 0 3 6; do
         echo "CPU${p}_CUR=$(cat /sys/devices/system/cpu/cpufreq/policy${p}/scaling_cur_freq 2>/dev/null || echo 0)"
         echo "CPU${p}_MAX=$(cat /sys/devices/system/cpu/cpufreq/policy${p}/scaling_max_freq 2>/dev/null || echo 0)"
         echo "CPU${p}_HW=$(cat /sys/devices/system/cpu/cpufreq/policy${p}/cpuinfo_max_freq 2>/dev/null || echo 0)"
+        echo "CPU${p}_ACT=$(cat /sys/devices/system/cpu/cpu${p}/core_ctl/active_cpus 2>/dev/null || echo '?')"
     done
+    echo "FAS_EN=$(cat /sys/kernel/fas/mgr/fas_enable 2>/dev/null | tr -d ' ' || echo '?')"
+    echo "COOL_SW=$(cat /sys/class/hn_thermal/cooling/cooling_switch 2>/dev/null | tr -d ' ' || echo '?')"
+    echo "DUBAID_SVC=$(getprop init.svc.dubaid 2>/dev/null || echo '?')"
 
     # Adreno 850 GPU telemetry
     echo "GPU_CUR=$(cat /sys/class/kgsl/kgsl-3d0/clock_mhz 2>/dev/null || echo 0)"
@@ -639,6 +682,7 @@ do_telemetry() {
     echo "PERF_GPU_RAMP=$PERF_GPU_RAMP"
     echo "PERF_GPU_MAX_WAKE=$PERF_GPU_MAX_WAKE"
     echo "PERF_CPU_UNLOCK=$PERF_CPU_UNLOCK"
+    echo "PERF_THERMAL_DOCKED=$PERF_THERMAL_DOCKED"
     echo "PERF_WALT_BURST=$PERF_WALT_BURST"
     echo "PERF_VM_IO=$PERF_VM_IO"
     echo "PERF_THP_OPT=$PERF_THP_OPT"
