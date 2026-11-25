@@ -383,8 +383,8 @@ apply_xfce_tweaks() {
 apply_perf_tweaks() {
     load_conf
 
-    # Keep Termux, Termux:X11, and Debian GPU Manager exempt from Doze/bg throttling
-    for pkg in com.termux com.termux.x11 com.debiangpu.manager; do
+    # Keep Termux, Termux:X11, Tailscale, and Debian GPU Manager exempt from Doze/bg throttling
+    for pkg in com.termux com.termux.x11 com.debiangpu.manager com.tailscale.ipn me.weishu.kernelsu; do
         cmd deviceidle whitelist +"$pkg" >/dev/null 2>&1 || true
         cmd appops set "$pkg" RUN_IN_BACKGROUND allow >/dev/null 2>&1 || true
         cmd appops set "$pkg" RUN_ANY_IN_BACKGROUND allow >/dev/null 2>&1 || true
@@ -513,11 +513,12 @@ apply_perf_tweaks() {
         (echo 51 > /proc/sys/walt/sched_min_task_util_for_boost) 2>/dev/null || true
     fi
 
-    # 6. Memory & chroot loop I/O tuning (use swappiness=5 while Gunyah crosvm is active if PERF_VM_IO=1)
+    # 6. Memory & chroot loop I/O tuning (allow moderate ZRAM swap so 5-6 GB Gunyah VM never triggers lmkd/OOM)
     LDEV=$(get_loop_dev || true)
     if [ "$PERF_VM_IO" = "1" ]; then
         if pgrep -x crosvm >/dev/null 2>&1; then
-            (echo 5 > /proc/sys/vm/swappiness) 2>/dev/null || true
+            (echo 15 > /proc/sys/vm/swappiness) 2>/dev/null || true
+            [ -w /proc/sys/vm/direct_swappiness ] && (echo 20 > /proc/sys/vm/direct_swappiness) 2>/dev/null || true
         else
             (echo 20 > /proc/sys/vm/swappiness) 2>/dev/null || true
         fi
@@ -529,9 +530,18 @@ apply_perf_tweaks() {
         [ -n "$LDEV" ] && (echo 128 > "/sys/block/$LDEV/queue/read_ahead_kb") 2>/dev/null || true
     fi
 
-    # 7. Transparent Huge Pages defrag stutter fix (keep full mTHP=always while Gunyah crosvm is active)
-    if [ -d /sys/kernel/mm/transparent_hugepage ] && ! pgrep -x crosvm >/dev/null 2>&1; then
-        if [ "$PERF_THP_OPT" = "1" ]; then
+    # 7. Transparent Huge Pages defrag stutter fix & OOM-safe mTHP shmem policy
+    # Linux 6.18 shmem mTHP orders <= PAGE_ALLOC_COSTLY_ORDER (32kB/16kB/8kB = order 3/2/1)
+    # invoke the kernel OOM killer under defrag=always/madvise (GFP_TRANSHUGE lacks __GFP_NORETRY).
+    # Keep sub-64kB shmem mTHP disabled and never use synchronous defrag=always during VM boot.
+    if [ -d /sys/kernel/mm/transparent_hugepage ]; then
+        for sz in 32kB 16kB 8kB; do
+            [ -w "/sys/kernel/mm/transparent_hugepage/hugepages-$sz/shmem_enabled" ] && \
+                (echo never > "/sys/kernel/mm/transparent_hugepage/hugepages-$sz/shmem_enabled") 2>/dev/null || true
+        done
+        if pgrep -x crosvm >/dev/null 2>&1; then
+            (echo defer > /sys/kernel/mm/transparent_hugepage/defrag) 2>/dev/null || true
+        elif [ "$PERF_THP_OPT" = "1" ]; then
             (echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag) 2>/dev/null || true
             (echo madvise > /sys/kernel/mm/transparent_hugepage/enabled) 2>/dev/null || true
             for sz in 128kB 256kB 512kB 1024kB 2048kB; do
@@ -539,7 +549,7 @@ apply_perf_tweaks() {
             done
             (echo always > /sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled) 2>/dev/null || true
         else
-            (echo always > /sys/kernel/mm/transparent_hugepage/defrag) 2>/dev/null || true
+            (echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag) 2>/dev/null || true
             (echo always > /sys/kernel/mm/transparent_hugepage/enabled) 2>/dev/null || true
             for sz in 64kB 128kB 256kB 512kB 1024kB 2048kB; do
                 (echo always > "/sys/kernel/mm/transparent_hugepage/hugepages-$sz/enabled") 2>/dev/null || true
@@ -547,9 +557,9 @@ apply_perf_tweaks() {
         fi
     fi
 
-    # 7b. MGLRU working-set guard (0 when crosvm is active to avoid bypassing lmkd),
-    # HyperHold zswapd churn reduction & udmabuf Venus/Wayland cap unlock.
-    # Captures true stock values on first touch for clean revert.
+    # 7b. HyperHold zswapd churn reduction & udmabuf Venus/Wayland cap unlock.
+    # Always keep MGLRU min_ttl_ms=0 on Android so MGLRU never bypasses lmkd and OOM-kills VMs/system daemons.
+    (echo 0 > /sys/kernel/mm/lru_gen/min_ttl_ms) 2>/dev/null || true
     save_orig_node /sys/module/udmabuf/parameters/size_limit_mb udmabuf_size
     save_orig_node /sys/module/udmabuf/parameters/list_limit udmabuf_list
     if [ ! -f "$GUARD_DIR/orig_hh_avail_bufs" ] && [ -r /sys/block/zram0/hyperhold_avail_buffers ] && ! is_mounted_path /sys/block/zram0/hyperhold_avail_buffers; then
@@ -558,17 +568,10 @@ apply_perf_tweaks() {
             /sys/block/zram0/hyperhold_avail_buffers > "$GUARD_DIR/orig_hh_avail_bufs" 2>/dev/null || true
     fi
     if [ "$PERF_MEM_OPT" = "1" ]; then
-        LRU_EN=$(cat /sys/kernel/mm/lru_gen/enabled 2>/dev/null || echo 0)
-        if pgrep -x crosvm >/dev/null 2>&1 || [ "$LRU_EN" = "0x0000" ] || [ "$LRU_EN" = "0" ]; then
-            (echo 0 > /sys/kernel/mm/lru_gen/min_ttl_ms) 2>/dev/null || true
-        else
-            (echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms) 2>/dev/null || true
-        fi
         guard_sysfs_node /sys/block/zram0/hyperhold_avail_buffers "1800 1750 1850 500" hh_avail_bufs
         (echo 2048 > /sys/module/udmabuf/parameters/size_limit_mb) 2>/dev/null || true
         (echo 4096 > /sys/module/udmabuf/parameters/list_limit) 2>/dev/null || true
     else
-        (echo 0 > /sys/kernel/mm/lru_gen/min_ttl_ms) 2>/dev/null || true
         ORIG_HH=$(get_orig_node hh_avail_bufs "")
         unguard_sysfs_node /sys/block/zram0/hyperhold_avail_buffers "$ORIG_HH"
         ORIG_USZ=$(get_orig_node udmabuf_size "512" | tr -d ' \r\n')
@@ -969,11 +972,10 @@ do_macos_start() {
     if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -x xnu_fb_bridge >/dev/null 2>&1 || pgrep -f "^sh /data/adb/run-xnulinux-vm\\.sh" >/dev/null 2>&1; then
         do_macos_stop >/dev/null 2>&1 || true
     fi
-    # Evict idle cached Android apps & drop page cache so Gunyah --hugepages gets clean 2MB folios
-    am kill-all >/dev/null 2>&1 || true
-    sync
-    (echo 3 > /proc/sys/vm/drop_caches) 2>/dev/null || true
-    sleep 0.5
+    # Drop Linux page cache & compact free RAM cleanly WITHOUT running `am kill-all`
+    # (which kills Tailscale VPN, Termux, bridges, and background services).
+    evict_cached_apps_safe
+    sleep 0.3
 
     # Reset XNU dmesg log & stale guest IP so readiness reflects this boot
     : > "$MACOS_DIR/xnu-dmesg.log" 2>/dev/null || true
@@ -996,6 +998,11 @@ do_macos_start() {
     if [ -x /data/adb/xnu_fb_bridge ]; then
         setsid /data/adb/xnu_fb_bridge >/data/local/tmp/xnu_fb_bridge.log 2>&1 </dev/null &
         sleep 0.3
+        for p in $(pidof xnu_fb_bridge 2>/dev/null); do
+            [ -w /dev/cpuset/top-app/cgroup.procs ] && echo "$p" > /dev/cpuset/top-app/cgroup.procs 2>/dev/null || true
+            [ -w /dev/cpuctl/top-app/cgroup.procs ] && echo "$p" > /dev/cpuctl/top-app/cgroup.procs 2>/dev/null || true
+            [ -w "/proc/$p/oom_score_adj" ] && echo -900 > "/proc/$p/oom_score_adj" 2>/dev/null || true
+        done
         am start --user 0 -n com.debiangpu.manager/.DisplayActivity --es mode mac >/dev/null 2>&1 || true
     else
         # Fallback to legacy Termux:X11 viewer if direct bridge is not installed
@@ -1021,19 +1028,39 @@ do_macos_start() {
         i=$((i + 1))
     done
 
-    # Re-apply VM-aware memory tuning now that crosvm is live (swappiness=5, MGLRU min_ttl_ms=0)
+    # Re-apply VM-aware memory tuning now that crosvm is live (swappiness=15, direct_swappiness=20, MGLRU min_ttl_ms=0, defrag=defer)
     if pgrep -x crosvm >/dev/null 2>&1; then
         apply_perf_tweaks >/dev/null 2>&1 || true
     fi
 
-    # Promote direct display bridge into Android top-app scheduling group
+    # Promote direct display bridge into Android top-app scheduling group & shield from lmkd
     for p in $(pidof xnu_fb_bridge xnu_fb_view 2>/dev/null); do
         [ -w /dev/cpuset/top-app/cgroup.procs ] && echo "$p" > /dev/cpuset/top-app/cgroup.procs 2>/dev/null || true
         [ -w /dev/cpuctl/top-app/cgroup.procs ] && echo "$p" > /dev/cpuctl/top-app/cgroup.procs 2>/dev/null || true
+        [ -w "/proc/$p/oom_score_adj" ] && echo -900 > "/proc/$p/oom_score_adj" 2>/dev/null || true
     done
 
-    # Start Audio (:4714), WebDAV/Clipboard (:8445), and wait in background for guest IP -> Tailscale forwards
+    # Start Audio (:4714), WebDAV/Clipboard (:8445), and wait in background for:
+    #  1) early XnuDisplay scanout PA -> /data/local/xnu-mac/xnu-scanout.cache (before dmesg wraps)
+    #  2) macOS guest IP -> Tailscale Screen Sharing (:5901) & SSH (:2223) forwards
     start_macos_services >/dev/null 2>&1 || true
+    setsid sh -c '
+        DMESG="/data/local/xnu-mac/xnu-dmesg.log"
+        CACHE="/data/local/xnu-mac/xnu-scanout.cache"
+        for _ in $(seq 1 160); do
+            CP=$(pgrep -o -x crosvm 2>/dev/null || true)
+            [ -n "$CP" ] || break
+            LINE=$(grep "XnuDisplay: scanout " "$DMESG" 2>/dev/null | tail -n 1 || true)
+            if [ -n "$LINE" ]; then
+                SCAN=$(printf "%s\n" "$LINE" | sed -n "s/.*XnuDisplay: scanout \(0x[0-9a-fA-F]*\) \([0-9]*\)x\([0-9]*\).*/\1 \2 \3/p")
+                if [ -n "$SCAN" ]; then
+                    printf "%s %s\n" "$CP" "$SCAN" > "$CACHE" 2>/dev/null || true
+                    break
+                fi
+            fi
+            sleep 0.25
+        done
+    ' >/dev/null 2>&1 </dev/null &
     setsid sh -c '
         for _ in $(seq 1 45); do
             sleep 3
@@ -1046,12 +1073,12 @@ do_macos_start() {
     ' >/dev/null 2>&1 </dev/null &
 
     VM_PID=$(pgrep -o -x crosvm 2>/dev/null || true)
-    VIEW_PID=$(pgrep -o -x xnu_fb_view 2>/dev/null || true)
+    BRIDGE_PID=$(pgrep -o -x xnu_fb_bridge 2>/dev/null || pgrep -o -x xnu_fb_view 2>/dev/null || true)
     if [ -n "$VM_PID" ]; then
         echo "macOS 27.2 VM booting on Gunyah (Adreno 850 Venus, ${FB_W}x${FB_H}, XNU ${XNU_RAM} MB / VM ${VM_MEM} MB)"
-        echo "crosvm PID: $VM_PID | xnu_fb_view PID: ${VIEW_PID:-none}"
+        echo "crosvm PID: $VM_PID | Display bridge PID: ${BRIDGE_PID:-none}"
         echo "Bridge: Audio :4714 | WebDAV & Clipboard :8445 | Log: $MACOS_LOG"
-        echo "Display appears in Termux:X11 automatically once XNU completes first swap (~30s)."
+        echo "Display appears automatically once XNU completes first swap (~30s)."
     else
         echo "Warning: crosvm did not stay running — tailing $MACOS_LOG:"
         tail -n 20 "$MACOS_LOG" 2>/dev/null || true
@@ -1204,16 +1231,35 @@ do_restore_bloat() {
     echo "Restored $RESTORED Honor packages (user 0). Reboot recommended if persistent services were restored."
 }
 
+evict_cached_apps_safe() {
+    # Gently reclaim memory from currently-running non-essential 3rd-party cached apps
+    # without touching Tailscale, Termux, Termux:X11, Debian GPU Manager, KernelSU, T3 Code,
+    # Bluetooth, or system bridges. Filters to running processes so it finishes in <1s.
+    local running_pkgs
+    running_pkgs=$( (
+        pm list packages -3 2>/dev/null | sed 's/^package:/P /'
+        (ps -A -o NAME 2>/dev/null || ps -A 2>/dev/null | awk '{print $NF}') | sed 's/:.*$//' | awk '{print "R " $1}'
+    ) | awk '$1=="P"{p[$2]=1} $1=="R" && p[$2]{print $2; delete p[$2]}' )
+    for pkg in $running_pkgs; do
+        case "$pkg" in
+            com.tailscale.ipn|com.termux|com.termux.x11|com.debiangpu.manager|me.weishu.kernelsu|com.t3tools.t3code)
+                continue ;;
+            *)
+                am kill "$pkg" >/dev/null 2>&1 || true ;;
+        esac
+    done
+    sync
+    (echo 3 > /proc/sys/vm/drop_caches) 2>/dev/null || true
+}
+
 do_free_ram() {
     BEFORE_FREE=$(awk '/^MemFree:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
     BEFORE_AVAIL=$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
-    am kill-all >/dev/null 2>&1 || true
-    sync
-    (echo 3 > /proc/sys/vm/drop_caches) 2>/dev/null || true
+    evict_cached_apps_safe
     sleep 0.5
     AFTER_FREE=$(awk '/^MemFree:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
     AFTER_AVAIL=$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)
-    echo "Evicted idle cached apps & dropped Linux page cache."
+    echo "Evicted idle cached apps (keeping Tailscale/Termux/bridges safe) & dropped Linux page cache."
     echo "MemFree:      ${BEFORE_FREE} MB -> ${AFTER_FREE} MB"
     echo "MemAvailable: ${BEFORE_AVAIL} MB -> ${AFTER_AVAIL} MB"
 }

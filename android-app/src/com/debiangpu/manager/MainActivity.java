@@ -424,8 +424,8 @@ public class MainActivity extends Activity {
                 "Lowers cluster0/1 upmigrate (95->40/45%) + asymcap_boost for faster 1C/UI bursts");
         addToggleRow(perfCard, "PERF_VM_IO", "RAM & Chroot Disk I/O Tuning",
                 "vm.swappiness=20, vfs_cache_pressure=50, loop read-ahead 512 KB");
-        addToggleRow(perfCard, "PERF_MEM_OPT", "MGLRU + HyperHold + udmabuf 2G",
-                "MGLRU min_ttl=1s (0 during VM), HyperHold 1.8 GB target, 2 GB udmabuf cap");
+        addToggleRow(perfCard, "PERF_MEM_OPT", "HyperHold + udmabuf 2G (OOM-Safe)",
+                "HyperHold 1.8 GB target (less zswapd churn), 2 GB udmabuf cap, MGLRU min_ttl=0");
         addToggleRow(perfCard, "PERF_THP_OPT", "THP Defrag Fix (ARM64 64K)",
                 "defrag=defer+madvise, 2MB=madvise, 64KB CONT-PTE=always (no compaction stalls)");
         addToggleRow(perfCard, "PERF_JEMALLOC", "jemalloc 5.3 Allocator (3.7x Faster)",
