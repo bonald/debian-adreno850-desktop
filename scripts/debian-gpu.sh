@@ -24,6 +24,7 @@
 #   su -c "/data/adb/debian-gpu.sh debloat"          - Disable 55 safe Honor/YOYO/China bloat packages (user-space)
 #   su -c "/data/adb/debian-gpu.sh restore-bloat"    - Restore all Honor packages disabled by debloat
 #   su -c "/data/adb/debian-gpu.sh free-ram"         - Evict cached background apps & drop page cache
+#   su -c "/data/adb/debian-gpu.sh kernel-profile"   - Run 3s zero-risk tracefs/kprobe kernel profiler
 #   su -c "/data/adb/debian-gpu.sh vnc"              - Restart VNC + noVNC proxy
 #   su -c "/data/adb/debian-gpu.sh passwd"           - Change VNC password
 
@@ -54,8 +55,11 @@ PERF_THERMAL_DOCKED=1
 PERF_WALT_BURST=1
 PERF_WALT_PRIME_BIAS=1
 PERF_VM_IO=1
+PERF_MEM_OPT=1
 PERF_THP_OPT=1
 PERF_JEMALLOC=1
+PERF_SHMEM_COMPAT=1
+PERF_KERNEL_BOOST=0
 PERF_XFCE_OPT=1
 PERF_CHROMIUM_VULKAN=1
 PERF_PULSEAUDIO=1
@@ -77,8 +81,11 @@ load_conf() {
     PERF_WALT_BURST=1
     PERF_WALT_PRIME_BIAS=1
     PERF_VM_IO=1
+    PERF_MEM_OPT=1
     PERF_THP_OPT=1
     PERF_JEMALLOC=1
+    PERF_SHMEM_COMPAT=1
+    PERF_KERNEL_BOOST=0
     PERF_XFCE_OPT=1
     PERF_CHROMIUM_VULKAN=1
     PERF_PULSEAUDIO=1
@@ -108,6 +115,26 @@ is_mounted_path() {
     local real
     real=$(readlink -f "$1" 2>/dev/null || echo "$1")
     grep -Fq " $real " /proc/self/mountinfo 2>/dev/null
+}
+
+save_orig_node() {
+    local target="$1" name="$2"
+    local orig="$GUARD_DIR/orig_$name"
+    [ -e "$target" ] || return 0
+    [ -f "$orig" ] && return 0
+    is_mounted_path "$target" && return 0
+    mkdir -p "$GUARD_DIR"
+    cat "$target" > "$orig" 2>/dev/null || true
+}
+
+get_orig_node() {
+    local name="$1" fallback="${2:-}"
+    local orig="$GUARD_DIR/orig_$name"
+    if [ -s "$orig" ]; then
+        cat "$orig" 2>/dev/null || echo "$fallback"
+    else
+        echo "$fallback"
+    fi
 }
 
 guard_sysfs_node() {
@@ -177,11 +204,13 @@ do_mount() {
     mountpoint -q "$MNT/dev/pts" || mount --bind /dev/pts "$MNT/dev/pts"
     mountpoint -q "$MNT/dev/shm" || mount -t tmpfs -o rw,nosuid,nodev,mode=1777 tmpfs "$MNT/dev/shm"
     mountpoint -q "$MNT/tmp/.X11-unix" || mount --bind "$X11_DIR" "$MNT/tmp/.X11-unix"
-    # Bind /data/media/0 (direct storage backing) instead of FUSE /storage/emulated/0 so it never hits ENOTCONN
-    if ! ls "$MNT/mnt/android" >/dev/null 2>&1; then
-        umount -l "$MNT/mnt/android" 2>/dev/null || true
+    if ! mountpoint -q "$MNT/mnt/android"; then
+        if [ -d /data/media/0 ]; then
+            mount --bind /data/media/0 "$MNT/mnt/android"
+        else
+            mount --bind /storage/emulated/0 "$MNT/mnt/android"
+        fi
     fi
-    mountpoint -q "$MNT/mnt/android" || mount --bind /data/media/0 "$MNT/mnt/android" 2>/dev/null || mount --bind /storage/emulated/0 "$MNT/mnt/android"
     printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > "$MNT/etc/resolv.conf"
     # Apply loop read-ahead right after mount if VM/IO tuning enabled
     load_conf
@@ -244,6 +273,88 @@ EOF
     chmod 644 "$ALLOC_FILE"
 }
 
+apply_shmem_compat() {
+    load_conf
+    mountpoint -q "$MNT" || return 0
+    SHMEM_FILE="$MNT/etc/profile.d/shmem-compat.sh"
+    if [ "$PERF_SHMEM_COMPAT" = "1" ] && [ -r "$MNT/usr/lib/aarch64-linux-gnu/libandroid-shmem.so" ]; then
+        cat > "$SHMEM_FILE" <<'EOF'
+# Managed by /data/adb/debian-gpu.sh (PERF_SHMEM_COMPAT=1)
+# Wire-compatible /dev/ashmem + abstract-socket SysV SHM / X11 MIT-SHM shim for Android GKI
+if [ -r /usr/lib/aarch64-linux-gnu/libandroid-shmem.so ]; then
+    unset QT_X11_NO_MITSHM
+    case ":${LD_PRELOAD:-}:" in
+        *:/usr/lib/aarch64-linux-gnu/libandroid-shmem.so:*) ;;
+        *) export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libandroid-shmem.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+    esac
+fi
+EOF
+    else
+        cat > "$SHMEM_FILE" <<'EOF'
+# Managed by /data/adb/debian-gpu.sh (PERF_SHMEM_COMPAT=0)
+export QT_X11_NO_MITSHM=1
+EOF
+    fi
+    chmod 644 "$SHMEM_FILE"
+    # Ensure turnip-a850.sh sources shmem-compat.sh so login shells & desktop apps inherit it
+    TURNIP_PROF="$MNT/etc/profile.d/turnip-a850.sh"
+    if [ -f "$TURNIP_PROF" ] && ! grep -q "shmem-compat.sh" "$TURNIP_PROF" 2>/dev/null; then
+        printf "\n# Optional SysV SHM / X11 MIT-SHM shim (managed by /data/adb/debian-gpu.sh PERF_SHMEM_COMPAT)\n[ -r /etc/profile.d/shmem-compat.sh ] && . /etc/profile.d/shmem-compat.sh\n" >> "$TURNIP_PROF"
+    fi
+}
+
+EXPECTED_KGSL_SHA256="2fb43a4754f44459c67ba6b65c574a561f0bdf113a5b810fc51071497bc3500b"
+
+apply_kernel_boost() {
+    [ "${SKIP_KBOOST:-0}" = "1" ] && return 0
+    load_conf
+    KBOOST_KO=/data/adb/honor_boost.ko
+    if [ "$PERF_KERNEL_BOOST" = "1" ] && [ -r "$KBOOST_KO" ]; then
+        KGSL_SHA=$(sha256sum /vendor_dlkm/lib/modules/msm_kgsl.ko 2>/dev/null | awk '{print $1}')
+        if [ -n "$KGSL_SHA" ] && [ "$KGSL_SHA" != "$EXPECTED_KGSL_SHA256" ]; then
+            echo "Warning: msm_kgsl.ko SHA-256 changed after OTA; skipping honor_boost.ko GPU hook." >&2
+            PERF_GPU_UNLOCK=0
+        fi
+        if ! lsmod 2>/dev/null | grep -q '^honor_boost '; then
+            insmod "$KBOOST_KO" >/dev/null 2>&1 || true
+        fi
+        if [ -d /sys/module/honor_boost/parameters ]; then
+            KGSL_VER=$(cat /sys/module/honor_boost/parameters/kgsl_verified 2>/dev/null || echo 0)
+            if [ "$PERF_GPU_UNLOCK" = "1" ] && [ "$KGSL_VER" = "1" ]; then
+                (echo 1 > /sys/module/honor_boost/parameters/gpu_unclamp) 2>/dev/null || true
+                # Let honor_boost.ko intercept real max_pwrlevel writes in-kernel (no stale sink file)
+                unguard_sysfs_node /sys/class/kgsl/kgsl-3d0/max_pwrlevel "0"
+            else
+                (echo 0 > /sys/module/honor_boost/parameters/gpu_unclamp) 2>/dev/null || true
+            fi
+            if [ "$PERF_CPU_UNLOCK" = "1" ]; then
+                (echo 5011200 > /sys/module/honor_boost/parameters/cpu_unclamp_khz) 2>/dev/null || true
+            else
+                (echo 0 > /sys/module/honor_boost/parameters/cpu_unclamp_khz) 2>/dev/null || true
+            fi
+        fi
+    else
+        if [ -d /sys/module/honor_boost/parameters ]; then
+            (echo 0 > /sys/module/honor_boost/parameters/gpu_unclamp) 2>/dev/null || true
+            (echo 0 > /sys/module/honor_boost/parameters/cpu_unclamp_khz) 2>/dev/null || true
+        fi
+        if lsmod 2>/dev/null | grep -q '^honor_boost '; then
+            rmmod honor_boost >/dev/null 2>&1 || true
+            # Re-apply stock KGSL max_pwrlevel and nudge CPU policies so lifted values don't linger
+            if [ "$PERF_GPU_UNLOCK" = "0" ]; then
+                ORIG_MAX_PL=$(get_orig_node gpu_max_pwrlevel "" | tr -d ' \r\n')
+                [ -n "$ORIG_MAX_PL" ] && (echo "$ORIG_MAX_PL" > /sys/class/kgsl/kgsl-3d0/max_pwrlevel) 2>/dev/null || true
+            fi
+            if [ "$PERF_CPU_UNLOCK" = "0" ]; then
+                for p in 0 3 6; do
+                    CUR_M=$(cat "/sys/devices/system/cpu/cpufreq/policy${p}/scaling_max_freq" 2>/dev/null || true)
+                    [ -n "$CUR_M" ] && (echo "$CUR_M" > "/sys/devices/system/cpu/cpufreq/policy${p}/scaling_max_freq") 2>/dev/null || true
+                done
+            fi
+        fi
+    fi
+}
+
 apply_xfce_tweaks() {
     load_conf
     mountpoint -q "$MNT" || return 0
@@ -286,23 +397,30 @@ apply_perf_tweaks() {
         settings put system SmartModeStatus 1 >/dev/null 2>&1 || true
     fi
 
-    # 2. Adreno 850 GPU thermal unlock (0 = 1450 MHz max)
+    # 2. Adreno 850 GPU thermal & max_pwrlevel unlock (0 = 1450 MHz max; clears Honor's silent max_pwrlevel=13 578 MHz cap)
+    save_orig_node /sys/class/kgsl/kgsl-3d0/max_pwrlevel gpu_max_pwrlevel
     if [ "$PERF_GPU_UNLOCK" = "1" ]; then
         guard_sysfs_node /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel "0" gpu_thermal_pwrlevel
+        guard_sysfs_node /sys/class/kgsl/kgsl-3d0/max_pwrlevel "0" gpu_max_pwrlevel
     else
         unguard_sysfs_node /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel "0"
+        ORIG_MAX_PL=$(get_orig_node gpu_max_pwrlevel "" | tr -d ' \r\n')
+        unguard_sysfs_node /sys/class/kgsl/kgsl-3d0/max_pwrlevel "$ORIG_MAX_PL"
     fi
 
-    # 3. Adreno 850 KGSL wake level & idle timer (+24% FPS in glmark2)
+    # 3. Adreno 850 KGSL wake level & idle timer (+24% FPS in glmark2; keeps GMU IFPC nap safe)
     if [ "$PERF_GPU_MAX_WAKE" = "1" ]; then
         (echo 0 > /sys/class/kgsl/kgsl-3d0/default_pwrlevel) 2>/dev/null || true
         (echo 500 > /sys/class/kgsl/kgsl-3d0/idle_timer) 2>/dev/null || true
+        (echo 0 > /sys/class/kgsl/kgsl-3d0/force_no_nap) 2>/dev/null || true
     elif [ "$PERF_GPU_RAMP" = "1" ]; then
         (echo 7 > /sys/class/kgsl/kgsl-3d0/default_pwrlevel) 2>/dev/null || true
         (echo 500 > /sys/class/kgsl/kgsl-3d0/idle_timer) 2>/dev/null || true
+        (echo 0 > /sys/class/kgsl/kgsl-3d0/force_no_nap) 2>/dev/null || true
     else
         (echo 22 > /sys/class/kgsl/kgsl-3d0/default_pwrlevel) 2>/dev/null || true
         (echo 80 > /sys/class/kgsl/kgsl-3d0/idle_timer) 2>/dev/null || true
+        (echo 0 > /sys/class/kgsl/kgsl-3d0/force_no_nap) 2>/dev/null || true
     fi
 
     # 4. CPU max frequency, honor_fas burst cap & core_ctl 8-core unlock
@@ -321,12 +439,13 @@ apply_perf_tweaks() {
         guard_sysfs_node /sys/kernel/msm_performance/parameters/cpu_max_freq \
             "0:3744000 1:3744000 2:3744000 3:4032000 4:4032000 5:4032000 6:5011200 7:5011200" \
             cpu_max_freq
-        for p in 0 3 6; do
-            chmod 644 "/sys/devices/system/cpu/cpufreq/policy$p/scaling_max_freq" 2>/dev/null || true
-            hw=$(cat "/sys/devices/system/cpu/cpufreq/policy$p/cpuinfo_max_freq" 2>/dev/null || true)
-            [ -n "$hw" ] && (echo "$hw" > "/sys/devices/system/cpu/cpufreq/policy$p/scaling_max_freq") 2>/dev/null || true
-        done
+        guard_sysfs_node /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq "3744000" pol0_max
+        guard_sysfs_node /sys/devices/system/cpu/cpufreq/policy3/scaling_max_freq "4032000" pol3_max
+        guard_sysfs_node /sys/devices/system/cpu/cpufreq/policy6/scaling_max_freq "5011200" pol6_max
     else
+        unguard_sysfs_node /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq "3744000"
+        unguard_sysfs_node /sys/devices/system/cpu/cpufreq/policy3/scaling_max_freq "4032000"
+        unguard_sysfs_node /sys/devices/system/cpu/cpufreq/policy6/scaling_max_freq "5011200"
         unguard_sysfs_node /sys/kernel/msm_performance/parameters/cpu_max_freq \
             "0:3744000 1:3744000 2:3744000 3:4032000 4:4032000 5:4032000 6:5011200 7:5011200"
         unguard_sysfs_node /sys/kernel/fas/mgr/fas_enable "1"
@@ -394,10 +513,14 @@ apply_perf_tweaks() {
         (echo 51 > /proc/sys/walt/sched_min_task_util_for_boost) 2>/dev/null || true
     fi
 
-    # 6. Memory & chroot loop I/O tuning
+    # 6. Memory & chroot loop I/O tuning (use swappiness=5 while Gunyah crosvm is active if PERF_VM_IO=1)
     LDEV=$(get_loop_dev || true)
     if [ "$PERF_VM_IO" = "1" ]; then
-        (echo 20 > /proc/sys/vm/swappiness) 2>/dev/null || true
+        if pgrep -x crosvm >/dev/null 2>&1; then
+            (echo 5 > /proc/sys/vm/swappiness) 2>/dev/null || true
+        else
+            (echo 20 > /proc/sys/vm/swappiness) 2>/dev/null || true
+        fi
         (echo 50 > /proc/sys/vm/vfs_cache_pressure) 2>/dev/null || true
         [ -n "$LDEV" ] && (echo 512 > "/sys/block/$LDEV/queue/read_ahead_kb") 2>/dev/null || true
     else
@@ -406,8 +529,8 @@ apply_perf_tweaks() {
         [ -n "$LDEV" ] && (echo 128 > "/sys/block/$LDEV/queue/read_ahead_kb") 2>/dev/null || true
     fi
 
-    # 7. Transparent Huge Pages defrag stutter fix (keep ARM64 64KB CONT-PTE always)
-    if [ -d /sys/kernel/mm/transparent_hugepage ]; then
+    # 7. Transparent Huge Pages defrag stutter fix (keep full mTHP=always while Gunyah crosvm is active)
+    if [ -d /sys/kernel/mm/transparent_hugepage ] && ! pgrep -x crosvm >/dev/null 2>&1; then
         if [ "$PERF_THP_OPT" = "1" ]; then
             (echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag) 2>/dev/null || true
             (echo madvise > /sys/kernel/mm/transparent_hugepage/enabled) 2>/dev/null || true
@@ -424,9 +547,41 @@ apply_perf_tweaks() {
         fi
     fi
 
-    # 8. Sync chroot configs & boot persistence
+    # 7b. MGLRU working-set guard (0 when crosvm is active to avoid bypassing lmkd),
+    # HyperHold zswapd churn reduction & udmabuf Venus/Wayland cap unlock.
+    # Captures true stock values on first touch for clean revert.
+    save_orig_node /sys/module/udmabuf/parameters/size_limit_mb udmabuf_size
+    save_orig_node /sys/module/udmabuf/parameters/list_limit udmabuf_list
+    if [ ! -f "$GUARD_DIR/orig_hh_avail_bufs" ] && [ -r /sys/block/zram0/hyperhold_avail_buffers ] && ! is_mounted_path /sys/block/zram0/hyperhold_avail_buffers; then
+        mkdir -p "$GUARD_DIR"
+        awk '/hhgki_avail_buffers:/{a=$2} /hhgki_min_avail_buffers:/{b=$2} /hhgki_high_avail_buffers:/{c=$2} /hhgki_free_swap_threshold:/{d=$2} END{if(a!=""&&b!=""&&c!=""&&d!="") print a,b,c,d}' \
+            /sys/block/zram0/hyperhold_avail_buffers > "$GUARD_DIR/orig_hh_avail_bufs" 2>/dev/null || true
+    fi
+    if [ "$PERF_MEM_OPT" = "1" ]; then
+        LRU_EN=$(cat /sys/kernel/mm/lru_gen/enabled 2>/dev/null || echo 0)
+        if pgrep -x crosvm >/dev/null 2>&1 || [ "$LRU_EN" = "0x0000" ] || [ "$LRU_EN" = "0" ]; then
+            (echo 0 > /sys/kernel/mm/lru_gen/min_ttl_ms) 2>/dev/null || true
+        else
+            (echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms) 2>/dev/null || true
+        fi
+        guard_sysfs_node /sys/block/zram0/hyperhold_avail_buffers "1800 1750 1850 500" hh_avail_bufs
+        (echo 2048 > /sys/module/udmabuf/parameters/size_limit_mb) 2>/dev/null || true
+        (echo 4096 > /sys/module/udmabuf/parameters/list_limit) 2>/dev/null || true
+    else
+        (echo 0 > /sys/kernel/mm/lru_gen/min_ttl_ms) 2>/dev/null || true
+        ORIG_HH=$(get_orig_node hh_avail_bufs "")
+        unguard_sysfs_node /sys/block/zram0/hyperhold_avail_buffers "$ORIG_HH"
+        ORIG_USZ=$(get_orig_node udmabuf_size "512" | tr -d ' \r\n')
+        ORIG_ULM=$(get_orig_node udmabuf_list "1024" | tr -d ' \r\n')
+        (echo "$ORIG_USZ" > /sys/module/udmabuf/parameters/size_limit_mb) 2>/dev/null || true
+        (echo "$ORIG_ULM" > /sys/module/udmabuf/parameters/list_limit) 2>/dev/null || true
+    fi
+
+    # 8. Sync chroot configs, runtime kernel monkey-patch LKM & boot persistence
     apply_chromium_flags
     apply_allocator_opt
+    apply_shmem_compat
+    apply_kernel_boost
     apply_xfce_tweaks
     sync_boot_script
 }
@@ -443,9 +598,8 @@ start_pulseaudio() {
             fi
         fi
         if ! pgrep -x pulseaudio >/dev/null 2>&1; then
-            rm -rf \"\$TMPDIR\"/pulse-* \"\$HOME\"/.config/pulse/*.pid 2>/dev/null || true
-            env -u PULSE_SERVER pulseaudio --start --load='module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1' --exit-idle-time=-1 >/dev/null 2>&1 || true
-            sleep 0.6
+            pulseaudio --start --load='module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1' --exit-idle-time=-1 >/dev/null 2>&1 || true
+            sleep 0.5
         fi
         if ! timeout 3 pactl list short sinks 2>/dev/null | grep -qiE 'AAudio_sink|OpenSL'; then
             timeout 3 pactl load-module module-aaudio-sink >/dev/null 2>&1 || timeout 3 pactl load-module module-sles-sink >/dev/null 2>&1 || true
@@ -460,6 +614,10 @@ start_pulseaudio() {
                 timeout 3 pactl move-sink-input \"\$idx\" \"\$SINK\" >/dev/null 2>&1 || true
             done
         fi
+        # Ensure TCP simple-protocol listener on 127.0.0.1:4714 for macOS AndroidAudio.driver
+        if ! timeout 3 pactl list short modules 2>/dev/null | grep -q 'module-simple-protocol-tcp'; then
+            timeout 3 pactl load-module module-simple-protocol-tcp rate=48000 format=s16le channels=2 port=4714 listen=127.0.0.1 playback=true record=false >/dev/null 2>&1 || true
+        fi
     " 2>/dev/null || true
 }
 
@@ -473,7 +631,7 @@ do_set_toggle() {
     KEY="${1:-}"
     VAL="${2:-}"
     case "$KEY" in
-        PERF_HONOR_MODE|PERF_GPU_UNLOCK|PERF_GPU_RAMP|PERF_GPU_MAX_WAKE|PERF_CPU_UNLOCK|PERF_THERMAL_DOCKED|PERF_WALT_BURST|PERF_WALT_PRIME_BIAS|PERF_VM_IO|PERF_THP_OPT|PERF_JEMALLOC|PERF_XFCE_OPT|PERF_CHROMIUM_VULKAN|PERF_PULSEAUDIO|PERF_BOOT_PERSIST)
+        PERF_HONOR_MODE|PERF_GPU_UNLOCK|PERF_GPU_RAMP|PERF_GPU_MAX_WAKE|PERF_CPU_UNLOCK|PERF_THERMAL_DOCKED|PERF_WALT_BURST|PERF_WALT_PRIME_BIAS|PERF_VM_IO|PERF_MEM_OPT|PERF_THP_OPT|PERF_JEMALLOC|PERF_SHMEM_COMPAT|PERF_KERNEL_BOOST|PERF_XFCE_OPT|PERF_CHROMIUM_VULKAN|PERF_PULSEAUDIO|PERF_BOOT_PERSIST)
             ;;
         *)
             echo "Unknown toggle key: $KEY" >&2
@@ -530,8 +688,11 @@ PERF_THERMAL_DOCKED=0
 PERF_WALT_BURST=0
 PERF_WALT_PRIME_BIAS=0
 PERF_VM_IO=0
+PERF_MEM_OPT=0
 PERF_THP_OPT=0
 PERF_JEMALLOC=0
+PERF_SHMEM_COMPAT=0
+PERF_KERNEL_BOOST=0
 PERF_XFCE_OPT=0
 PERF_CHROMIUM_VULKAN=0
 PERF_PULSEAUDIO=1
@@ -550,7 +711,7 @@ do_profile() {
     case "$PROF" in
         docked)
             cat > "$CONF" <<EOF
-# Profile: Docked Max (all 15 performance tweaks enabled)
+# Profile: Docked Max (all 18 performance + kernel boost + compat tweaks enabled)
 PERF_HONOR_MODE=1
 PERF_GPU_UNLOCK=1
 PERF_GPU_RAMP=1
@@ -560,8 +721,11 @@ PERF_THERMAL_DOCKED=1
 PERF_WALT_BURST=1
 PERF_WALT_PRIME_BIAS=1
 PERF_VM_IO=1
+PERF_MEM_OPT=1
 PERF_THP_OPT=1
 PERF_JEMALLOC=1
+PERF_SHMEM_COMPAT=1
+PERF_KERNEL_BOOST=0
 PERF_XFCE_OPT=1
 PERF_CHROMIUM_VULKAN=1
 PERF_PULSEAUDIO=1
@@ -572,11 +736,11 @@ EOF
             chmod 644 "$CONF"
             apply_perf_tweaks
             start_pulseaudio
-            echo "Applied profile: Docked Max (all 15 tweaks ON, 1450 MHz wake, docked thermal)."
+            echo "Applied profile: Docked Max (17 tweaks ON, 1450 MHz wake, docked thermal; honor_boost.ko opt-in)."
             ;;
         battery)
             cat > "$CONF" <<EOF
-# Profile: Battery / Portable (stock thermals/clocks + zero-power desktop optimizations)
+# Profile: Battery / Portable (stock thermals/clocks + zero-power desktop/mem/SHM optimizations)
 PERF_HONOR_MODE=0
 PERF_GPU_UNLOCK=0
 PERF_GPU_RAMP=0
@@ -586,8 +750,11 @@ PERF_THERMAL_DOCKED=0
 PERF_WALT_BURST=0
 PERF_WALT_PRIME_BIAS=0
 PERF_VM_IO=1
+PERF_MEM_OPT=1
 PERF_THP_OPT=1
 PERF_JEMALLOC=1
+PERF_SHMEM_COMPAT=1
+PERF_KERNEL_BOOST=0
 PERF_XFCE_OPT=1
 PERF_CHROMIUM_VULKAN=1
 PERF_PULSEAUDIO=1
@@ -597,7 +764,7 @@ MACOS_RAM_MB=${MACOS_RAM_MB:-4400}
 EOF
             chmod 644 "$CONF"
             apply_perf_tweaks
-            echo "Applied profile: Battery / Portable (dubaid + stock clocks/thermals restored; jemalloc/THP/Vulkan/Audio kept ON)."
+            echo "Applied profile: Battery / Portable (dubaid + stock clocks restored; MGLRU/HyperHold/udmabuf/SHM/jemalloc/THP/Vulkan ON)."
             ;;
         *)
             echo "Usage: $0 profile {docked|battery}" >&2
@@ -656,11 +823,12 @@ start_termux_x11() {
 kill_desktop_procs() {
     run_in_chroot '
         for p in x0vncserver X0tigervnc i3 polybar picom dunst kitty \
-                 xfce4-session xfwm4 xfce4-panel xfdesktop xfsettingsd xfconfd plank; do
+                 xfce4-session xfwm4 xfce4-panel xfdesktop xfsettingsd xfconfd plank \
+                 labwc waybar swaybg foot Xwayland wayland_android_bridge; do
             pkill -9 -x "$p" 2>/dev/null || true
         done
         pkill -9 -f "[w]ebsockify.*6080" 2>/dev/null || true
-        pkill -9 -f "[d]bus-run-session -- (i3|startxfce4)" 2>/dev/null || true
+        pkill -9 -f "[d]bus-run-session -- (i3|startxfce4|labwc)" 2>/dev/null || true
         rm -rf /home/droid/.cache/sessions 2>/dev/null || true
     ' || true
     pkill -9 -f "TCP-LISTEN:[5]900" 2>/dev/null || true
@@ -683,11 +851,6 @@ kill_matching_safe() {
     local pat="$1"
     for p in $(pgrep -f "$pat" 2>/dev/null || true); do
         [ "$p" = "$$" ] && continue
-        [ "$p" = "${PPID:-0}" ] && continue
-        comm=$(cat "/proc/$p/comm" 2>/dev/null || true)
-        case "$comm" in
-            sh|mksh|bash|su) continue ;;
-        esac
         kill -9 "$p" 2>/dev/null || true
     done
 }
@@ -722,12 +885,19 @@ start_macos_services() {
     done
 
     if ip -4 addr show 2>/dev/null | grep -q "192.168.78.1"; then
-        # Unified Audio (:4714 -> libpulse-simple -> AAudio_sink) + WebDAV (/android, /debian) + Clipboard + IP bridge (:8445)
+        # 1. Audio TCP bridge (strictly on private VM TAP 192.168.78.1:4714 -> Termux PulseAudio AAudio)
         kill_matching_safe "TCP-LISTEN:4714"
+        if [ -x "$MNT/usr/bin/socat" ]; then
+            setsid chroot "$MNT" /usr/bin/socat \
+                "TCP-LISTEN:4714,bind=192.168.78.1,reuseaddr,fork,nodelay" TCP:127.0.0.1:4714 \
+                >"$MNT/tmp/socat-audio.log" 2>&1 </dev/null &
+        fi
+
+        # 2. WebDAV (/android, /debian) + Bidirectional Clipboard + Guest IP bridge on 192.168.78.1:8445
         kill_matching_safe "/usr/local/bin/macos-bridge.py"
         if [ -x "$MNT/usr/local/bin/macos-bridge.py" ]; then
             setsid chroot "$MNT" /usr/bin/env \
-                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DISPLAY=:0 PULSE_SERVER=127.0.0.1 \
+                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin DISPLAY=:0 \
                 python3 /usr/local/bin/macos-bridge.py \
                 >"$MNT/tmp/macos-bridge.log" 2>&1 </dev/null &
         fi
@@ -757,14 +927,16 @@ start_macos_services() {
 do_macos_stop() {
     stop_macos_services
     pkill -TERM -x xnu_fb_view 2>/dev/null || true
+    pkill -TERM -x xnu_fb_bridge 2>/dev/null || true
     pkill -TERM -f "^sh /data/adb/run-xnulinux-vm\\.sh" 2>/dev/null || true
     pkill -TERM -x crosvm 2>/dev/null || true
     i=0
-    while (pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1) && [ "$i" -lt 10 ]; do
+    while (pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -x xnu_fb_bridge >/dev/null 2>&1) && [ "$i" -lt 10 ]; do
         sleep 0.5
         i=$((i + 1))
     done
     pkill -KILL -x xnu_fb_view 2>/dev/null || true
+    pkill -KILL -x xnu_fb_bridge 2>/dev/null || true
     pkill -KILL -f "^sh /data/adb/run-xnulinux-vm\\.sh" 2>/dev/null || true
     pkill -KILL -x crosvm 2>/dev/null || true
     if [ -r /sys/power/wake_lock ] && [ -w /sys/power/wake_unlock ]; then
@@ -772,6 +944,9 @@ do_macos_stop() {
             echo "$wl" > /sys/power/wake_unlock 2>/dev/null || true
         done
     fi
+    [ -w /proc/sys/vm/direct_swappiness ] && (echo 60 > /proc/sys/vm/direct_swappiness) 2>/dev/null || true
+    [ -w /sys/block/zram0/hyperhold_cold_writeback ] && (echo 1 > /sys/block/zram0/hyperhold_cold_writeback) 2>/dev/null || true
+    apply_perf_tweaks >/dev/null 2>&1 || true
     echo "macOS 27 VM stopped."
 }
 
@@ -784,15 +959,14 @@ do_macos_start() {
     do_mount
     ensure_macos_bind
     apply_perf_tweaks
-    start_termux_x11
     start_pulseaudio
 
-    # Free Termux:X11 (:0) and RAM by stopping Debian desktop & any prior VM instance
-    if pgrep -x xfwm4 >/dev/null 2>&1 || pgrep -x plank >/dev/null 2>&1 || pgrep -x x0vncserver >/dev/null 2>&1; then
-        echo "Stopping Debian XFCE4 desktop before starting macOS 27..."
+    # Free RAM by stopping Debian desktop (Wayland or XFCE4) & any prior VM instance
+    if pgrep -x xfwm4 >/dev/null 2>&1 || pgrep -x plank >/dev/null 2>&1 || pgrep -x labwc >/dev/null 2>&1 || pgrep -x x0vncserver >/dev/null 2>&1; then
+        echo "Stopping Debian desktop before starting macOS 27..."
         kill_desktop_procs
     fi
-    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -f "^sh /data/adb/run-xnulinux-vm\\.sh" >/dev/null 2>&1; then
+    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -x xnu_fb_bridge >/dev/null 2>&1 || pgrep -f "^sh /data/adb/run-xnulinux-vm\\.sh" >/dev/null 2>&1; then
         do_macos_stop >/dev/null 2>&1 || true
     fi
     # Evict idle cached Android apps & drop page cache so Gunyah --hugepages gets clean 2MB folios
@@ -804,7 +978,7 @@ do_macos_start() {
     # Reset XNU dmesg log & stale guest IP so readiness reflects this boot
     : > "$MACOS_DIR/xnu-dmesg.log" 2>/dev/null || true
     : > "$MACOS_LOG" 2>/dev/null || true
-    rm -f "$MNT/tmp/macos-ip" 2>/dev/null || true
+    rm -f "$MNT/tmp/macos-ip" "$MACOS_DIR/xnu-scanout.cache" 2>/dev/null || true
 
     # Apply persisted resolution & RAM presets (overrideable via env)
     RES="${MACOS_RES:-1920x1080}"
@@ -813,17 +987,27 @@ do_macos_start() {
     XNU_RAM="${XNU_RAM_MB:-${MACOS_RAM_MB:-4400}}"
     LINUX_MB=512
     VM_MEM="${VM_MEM_MB:-$(( ((LINUX_MB + XNU_RAM + 208 + 63) / 64) * 64 ))}"
+    if [ "$VM_MEM" -gt 6144 ]; then
+        VM_MEM=6144
+        [ "$((XNU_RAM + LINUX_MB + 128))" -gt 6144 ] && XNU_RAM=$((6144 - LINUX_MB - 128))
+    fi
 
-    # Launch zero-copy X11 framebuffer viewer inside chroot as root (needs /proc/<crosvm>/fd access)
-    if [ -x "$MNT/usr/local/bin/xnu_fb_view" ]; then
-        setsid chroot "$MNT" /usr/bin/env -i \
-            DISPLAY=:0 \
-            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            /usr/local/bin/xnu_fb_view --fullscreen --size "${FB_W}x${FB_H}" \
-            >"$MNT$MACOS_VIEW_LOG" 2>&1 </dev/null &
-        sleep 0.5
+    # Direct GPU Display Bypass (zero Termux:X11 overhead): xnu_fb_bridge -> DebianGPU DisplayActivity
+    if [ -x /data/adb/xnu_fb_bridge ]; then
+        setsid /data/adb/xnu_fb_bridge >/data/local/tmp/xnu_fb_bridge.log 2>&1 </dev/null &
+        sleep 0.3
+        am start --user 0 -n com.debiangpu.manager/.DisplayActivity --es mode mac >/dev/null 2>&1 || true
     else
-        echo "Warning: $MNT/usr/local/bin/xnu_fb_view not found."
+        # Fallback to legacy Termux:X11 viewer if direct bridge is not installed
+        start_termux_x11
+        if [ -x "$MNT/usr/local/bin/xnu_fb_view" ]; then
+            setsid chroot "$MNT" /usr/bin/env -i \
+                DISPLAY=:0 \
+                PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                /usr/local/bin/xnu_fb_view --fullscreen --size "${FB_W}x${FB_H}" \
+                >"$MNT$MACOS_VIEW_LOG" 2>&1 </dev/null &
+            sleep 0.5
+        fi
     fi
 
     # Launch Gunyah + Adreno 850 Venus macOS 27.2 VM detached from caller stdio
@@ -837,8 +1021,13 @@ do_macos_start() {
         i=$((i + 1))
     done
 
-    # Promote viewer & Termux:X11 into Android top-app scheduling group
-    for p in $(pidof xnu_fb_view termux-x11 2>/dev/null); do
+    # Re-apply VM-aware memory tuning now that crosvm is live (swappiness=5, MGLRU min_ttl_ms=0)
+    if pgrep -x crosvm >/dev/null 2>&1; then
+        apply_perf_tweaks >/dev/null 2>&1 || true
+    fi
+
+    # Promote direct display bridge into Android top-app scheduling group
+    for p in $(pidof xnu_fb_bridge xnu_fb_view 2>/dev/null); do
         [ -w /dev/cpuset/top-app/cgroup.procs ] && echo "$p" > /dev/cpuset/top-app/cgroup.procs 2>/dev/null || true
         [ -w /dev/cpuctl/top-app/cgroup.procs ] && echo "$p" > /dev/cpuctl/top-app/cgroup.procs 2>/dev/null || true
     done
@@ -1069,9 +1258,91 @@ do_vnc() {
     do_status
 }
 
-do_start() {
+do_start_wayland() {
     do_mount
-    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -f "[r]un-xnulinux-vm.sh" >/dev/null 2>&1; then
+    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -x xnu_fb_bridge >/dev/null 2>&1 || pgrep -f "[r]un-xnulinux-vm.sh" >/dev/null 2>&1; then
+        echo "Stopping running macOS 27 VM before starting Debian Wayland Desktop..."
+        do_macos_stop
+    fi
+    apply_perf_tweaks
+    start_pulseaudio
+    kill_desktop_procs
+    sleep 0.3
+
+    # Ensure root-owned /tmp/.X11-unix so Xwayland can bind :0 cleanly
+    mountpoint -q "$MNT/tmp/.X11-unix" && umount -l "$MNT/tmp/.X11-unix" 2>/dev/null || true
+    mkdir -p "$MNT/tmp/.X11-unix"
+    chmod 1777 "$MNT/tmp/.X11-unix"
+    chown 0:0 "$MNT/tmp/.X11-unix"
+
+    run_in_chroot '
+        su - droid -c "
+            mkdir -p /tmp/xdg-droid && chmod 700 /tmp/xdg-droid
+            mkdir -p ~/.config/labwc
+            WP=/home/droid/.local/share/backgrounds/macos-dark.png
+            if [ -f \"\$WP\" ]; then
+                BG_CMD=\"swaybg -i \$WP -m fill\"
+            else
+                BG_CMD=\"swaybg -c #111520\"
+            fi
+            cat > ~/.config/labwc/autostart <<EOF
+wlr-randr --output HEADLESS-1 --custom-mode 1920x1080@120Hz >/tmp/wlr-randr.log 2>&1 || true
+\$BG_CMD >/dev/null 2>&1 &
+waybar >/tmp/waybar.log 2>&1 &
+EOF
+            export XDG_RUNTIME_DIR=/tmp/xdg-droid
+            export PULSE_SERVER=127.0.0.1
+            export VK_ICD_FILENAMES=/opt/turnip-a850/share/vulkan/icd.d/freedreno_drm_shim_icd.aarch64.json
+            export MESA_LOADER_DRIVER_OVERRIDE=zink
+            export GALLIUM_DRIVER=zink
+            export TU_DEBUG=noconform,noubwc
+            export WLR_BACKENDS=headless
+            export WLR_RENDERER=vulkan
+            export WLR_LIBINPUT_NO_DEVICES=1
+            export GTK_THEME=Adwaita:dark
+            export QT_QPA_PLATFORMTHEME=gtk3
+            export GDK_BACKEND=wayland,x11
+            export QT_QPA_PLATFORM=\"wayland;xcb\"
+            export MOZ_ENABLE_WAYLAND=1
+            export GSK_RENDERER=vulkan
+            . /etc/profile.d/allocator-opt.sh 2>/dev/null || true
+            . /etc/profile.d/shmem-compat.sh 2>/dev/null || true
+            nohup dbus-run-session -- labwc >/tmp/labwc.log 2>&1 </dev/null &
+        "
+    '
+    i=0
+    while ! [ -S "$MNT/tmp/xdg-droid/wayland-0" ] && [ "$i" -lt 20 ]; do
+        sleep 0.25
+        i=$((i + 1))
+    done
+
+    run_in_chroot '
+        su - droid -c "
+            export XDG_RUNTIME_DIR=/tmp/xdg-droid
+            export WAYLAND_DISPLAY=wayland-0
+            nohup /usr/local/bin/wayland_android_bridge >/tmp/wayland_bridge.log 2>&1 </dev/null &
+        "
+    '
+    sleep 0.5
+    for p in $(pidof labwc wayland_android_bridge 2>/dev/null); do
+        [ -w /dev/cpuset/top-app/cgroup.procs ] && echo "$p" > /dev/cpuset/top-app/cgroup.procs 2>/dev/null || true
+        [ -w /dev/cpuctl/top-app/cgroup.procs ] && echo "$p" > /dev/cpuctl/top-app/cgroup.procs 2>/dev/null || true
+    done
+    am start --user 0 -n com.debiangpu.manager/.DisplayActivity --es mode wayland >/dev/null 2>&1 || true
+    do_status
+}
+
+do_start() {
+    if [ -x "$MNT/usr/bin/labwc" ] && [ -x "$MNT/usr/local/bin/wayland_android_bridge" ]; then
+        do_start_wayland
+        return
+    fi
+    do_start_x11
+}
+
+do_start_x11() {
+    do_mount
+    if pgrep -x crosvm >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1 || pgrep -x xnu_fb_bridge >/dev/null 2>&1 || pgrep -f "[r]un-xnulinux-vm.sh" >/dev/null 2>&1; then
         echo "Stopping running macOS 27 VM before starting Debian Desktop..."
         do_macos_stop
     fi
@@ -1097,6 +1368,7 @@ do_start() {
             export GTK_THEME=Adwaita:dark
             export QT_QPA_PLATFORMTHEME=gtk3
             . /etc/profile.d/allocator-opt.sh 2>/dev/null || true
+            . /etc/profile.d/shmem-compat.sh 2>/dev/null || true
             nohup dbus-run-session -- startxfce4 >/tmp/xfce.log 2>&1 </dev/null &
         "
     '
@@ -1176,7 +1448,8 @@ do_telemetry() {
     echo "ROOT=1"
     mountpoint -q "$MNT" && echo "MOUNT=1" || echo "MOUNT=0"
     ([ -S "$X11_DIR/X0" ] || [ -S "$MNT/tmp/.X11-unix/X0" ] || ss -xl 2>/dev/null | grep -q 'X11-unix/X0') && (pgrep -f 'termux.x11' >/dev/null 2>&1 || ss -xl 2>/dev/null | grep -q 'X11-unix/X0') && echo "X11=1" || echo "X11=0"
-    pgrep -x xfwm4 >/dev/null 2>&1 && echo "DESKTOP=1" || echo "DESKTOP=0"
+    (pgrep -x xfwm4 >/dev/null 2>&1 || pgrep -x labwc >/dev/null 2>&1) && echo "DESKTOP=1" || echo "DESKTOP=0"
+    (pgrep -x labwc >/dev/null 2>&1 && pgrep -x wayland_android_bridge >/dev/null 2>&1) && echo "WAYLAND=1" || echo "WAYLAND=0"
     pgrep -x plank >/dev/null 2>&1 && echo "PLANK=1" || echo "PLANK=0"
     [ -x "$MACOS_SCRIPT" ] && echo "MACOS_AVAIL=1" || echo "MACOS_AVAIL=0"
     if pgrep -x crosvm >/dev/null 2>&1; then
@@ -1186,8 +1459,8 @@ do_telemetry() {
         echo "MACOS_VM=0"
         echo "MACOS_READY=0"
     fi
-    pgrep -x xnu_fb_view >/dev/null 2>&1 && echo "MACOS_VIEW=1" || echo "MACOS_VIEW=0"
-    (ss -tln 2>/dev/null | grep -q '192\.168\.78\.1:4714' || pgrep -f 'TCP-LISTEN:4714' >/dev/null 2>&1) && echo "MACOS_AUDIO=1" || echo "MACOS_AUDIO=0"
+    (pgrep -x xnu_fb_bridge >/dev/null 2>&1 || pgrep -x xnu_fb_view >/dev/null 2>&1) && echo "MACOS_VIEW=1" || echo "MACOS_VIEW=0"
+    pgrep -f 'TCP-LISTEN:4714' >/dev/null 2>&1 && echo "MACOS_AUDIO=1" || echo "MACOS_AUDIO=0"
     pgrep -f '/usr/local/bin/macos-bridge.py' >/dev/null 2>&1 && echo "MACOS_BRIDGE=1" || echo "MACOS_BRIDGE=0"
     pgrep -f 'TCP-LISTEN:5901' >/dev/null 2>&1 && echo "MACOS_REMOTE=1" || echo "MACOS_REMOTE=0"
     echo "MACOS_IP=$(get_macos_guest_ip || true)"
@@ -1196,7 +1469,7 @@ do_telemetry() {
     (pgrep -x x0vncserver >/dev/null 2>&1 || pgrep -x X0tigervnc >/dev/null 2>&1) && echo "VNC=1" || echo "VNC=0"
     pgrep -f 'websockify.*6080' >/dev/null 2>&1 && echo "NOVNC=1" || echo "NOVNC=0"
     if pgrep -x pulseaudio >/dev/null 2>&1; then
-        SINKS=$(su "$TUID" -g 3003 -c "export PREFIX=$TPREFIX HOME=$THOME PATH=$TPREFIX/bin:/system/bin PULSE_SERVER=127.0.0.1; timeout 2 pactl list short sinks 2>/dev/null" 2>/dev/null || true)
+        SINKS=$(su "$TUID" -g 3003 -c "export PREFIX=$TPREFIX PATH=$TPREFIX/bin:/system/bin PULSE_SERVER=127.0.0.1; timeout 2 pactl list short sinks 2>/dev/null" 2>/dev/null || true)
         if echo "$SINKS" | grep -qiE 'AAudio_sink|OpenSL'; then
             echo "PULSE=aaudio"
         else
@@ -1224,6 +1497,8 @@ do_telemetry() {
     echo "GPU_MAX=$(cat /sys/class/kgsl/kgsl-3d0/max_clock_mhz 2>/dev/null || echo 1450)"
     echo "GPU_BUSY=$(cat /sys/class/kgsl/kgsl-3d0/gpu_busy_percentage 2>/dev/null | tr -d ' %' || echo 0)"
     echo "GPU_THERM_LVL=$(cat /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel 2>/dev/null || echo 0)"
+    echo "GPU_MAX_LVL=$(cat /sys/class/kgsl/kgsl-3d0/max_pwrlevel 2>/dev/null || echo 0)"
+    echo "GPU_NO_NAP=$(cat /sys/class/kgsl/kgsl-3d0/force_no_nap 2>/dev/null || echo 0)"
     DEF_LVL=$(cat /sys/class/kgsl/kgsl-3d0/default_pwrlevel 2>/dev/null || echo 22)
     echo "GPU_DEF_LVL=$DEF_LVL"
     echo "GPU_IDLE_MS=$(cat /sys/class/kgsl/kgsl-3d0/idle_timer 2>/dev/null || echo 80)"
@@ -1248,6 +1523,34 @@ do_telemetry() {
     LDEV=$(get_loop_dev || true)
     echo "LOOP_RA=$([ -n "$LDEV" ] && cat "/sys/block/$LDEV/queue/read_ahead_kb" 2>/dev/null || echo '?')"
     echo "THP_DEFRAG=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || echo '?')"
+    echo "MGLRU_TTL=$(cat /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || echo 0)"
+    echo "UDMABUF_MB=$(cat /sys/module/udmabuf/parameters/size_limit_mb 2>/dev/null || echo 512)"
+    if [ -r "$MNT/usr/lib/aarch64-linux-gnu/libandroid-shmem.so" ] && grep -q "libandroid-shmem.so" "$MNT/etc/profile.d/shmem-compat.sh" 2>/dev/null; then
+        echo "SHMEM_LIB=1"
+        [ -c /dev/ashmem ] && echo "SHMEM_BACKING=ashmem" || echo "SHMEM_BACKING=memfd"
+    else
+        echo "SHMEM_LIB=0"
+        echo "SHMEM_BACKING=off"
+    fi
+    if lsmod 2>/dev/null | grep -q '^honor_boost '; then
+        echo "KBOOST_LOADED=1"
+        echo "KBOOST_FQ_LIFTED=$(cat /sys/module/honor_boost/parameters/fq_lifted 2>/dev/null || echo 0)"
+        echo "KBOOST_FQ_SKIP=$(cat /sys/module/honor_boost/parameters/fq_thermal_skip 2>/dev/null || echo 0)"
+        echo "KBOOST_KGSL_CLAMPS=$(cat /sys/module/honor_boost/parameters/kgsl_clamps 2>/dev/null || echo 0)"
+        echo "KBOOST_KGSL_VER=$(cat /sys/module/honor_boost/parameters/kgsl_verified 2>/dev/null || echo 0)"
+        echo "KBOOST_UDMABUF=$(cat /sys/module/honor_boost/parameters/udmabuf_hits 2>/dev/null || echo 0)"
+        echo "KBOOST_CPU_KHZ=$(cat /sys/module/honor_boost/parameters/cpu_unclamp_khz 2>/dev/null || echo 0)"
+        echo "KBOOST_GPU_UNCLAMP=$(cat /sys/module/honor_boost/parameters/gpu_unclamp 2>/dev/null || echo 0)"
+    else
+        echo "KBOOST_LOADED=0"
+        echo "KBOOST_FQ_LIFTED=0"
+        echo "KBOOST_FQ_SKIP=0"
+        echo "KBOOST_KGSL_CLAMPS=0"
+        echo "KBOOST_KGSL_VER=0"
+        echo "KBOOST_UDMABUF=0"
+        echo "KBOOST_CPU_KHZ=0"
+        echo "KBOOST_GPU_UNCLAMP=0"
+    fi
 
     # Honor MagicOS debloat status (checks the 17 primary resident Honor bloat packages)
     BLOAT_ACT=$(pm list packages -e 2>/dev/null | grep -cE '^package:(com\.hihonor\.(auto|awareness|brain|assistant|magicvoice|searchservice|aipluginengine|dms|android\.UEInfoCheck|msdp|hncloud|android\.thememanager|android\.pushagent|nearby|hiview|wallet)|com\.honor\.aimm)$' || true)
@@ -1277,8 +1580,11 @@ do_telemetry() {
     echo "PERF_WALT_BURST=$PERF_WALT_BURST"
     echo "PERF_WALT_PRIME_BIAS=$PERF_WALT_PRIME_BIAS"
     echo "PERF_VM_IO=$PERF_VM_IO"
+    echo "PERF_MEM_OPT=$PERF_MEM_OPT"
     echo "PERF_THP_OPT=$PERF_THP_OPT"
     echo "PERF_JEMALLOC=$PERF_JEMALLOC"
+    echo "PERF_SHMEM_COMPAT=$PERF_SHMEM_COMPAT"
+    echo "PERF_KERNEL_BOOST=$PERF_KERNEL_BOOST"
     echo "PERF_XFCE_OPT=$PERF_XFCE_OPT"
     echo "PERF_CHROMIUM_VULKAN=$PERF_CHROMIUM_VULKAN"
     echo "PERF_PULSEAUDIO=$PERF_PULSEAUDIO"
@@ -1287,6 +1593,8 @@ do_telemetry() {
 
 case "${1:-status}" in
     start)          do_start ;;
+    wayland-start)  do_start_wayland ;;
+    x11-start)      do_start_x11 ;;
     stop)           do_stop ;;
     macos-start)    do_macos_start ;;
     macos-stop)     do_macos_stop ;;
@@ -1298,7 +1606,7 @@ case "${1:-status}" in
     status)         do_status ;;
     vnc)            do_vnc ;;
     perf)           apply_perf_tweaks; echo "Perf tweaks applied." ;;
-    boot-apply)     apply_perf_tweaks ;;
+    boot-apply)     SKIP_KBOOST=1 apply_perf_tweaks ;;
     set-toggle)     do_set_toggle "${2:-}" "${3:-}" ;;
     reset-perf)     do_reset_perf ;;
     audio-fix)      PERF_PULSEAUDIO=1; start_pulseaudio; echo "PulseAudio AAudio_sink ready." ;;
@@ -1306,6 +1614,7 @@ case "${1:-status}" in
     debloat)        do_debloat ;;
     restore-bloat)  do_restore_bloat ;;
     free-ram)       do_free_ram ;;
+    kernel-profile) [ -x /data/adb/profile-kernel.sh ] && /data/adb/profile-kernel.sh "${2:-3}" || echo "profile-kernel.sh not installed" ;;
     telemetry)      do_telemetry ;;
     shell)
         do_mount

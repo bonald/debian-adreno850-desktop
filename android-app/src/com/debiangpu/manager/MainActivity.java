@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     private TextView tvGpuDetail, tvThermalsLine, tvPowerLine, tvMemLine, tvLauncherWarn;
 
     // System status badges
-    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeMacos, badgeMacosBridge, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator, badgeDebloat;
+    private TextView badgeRoot, badgeMount, badgeX11, badgeDesktop, badgeMacos, badgeMacosBridge, badgeAudio, badgeVnc, badgeBrowserGpu, badgeAllocator, badgeShmem, badgeKboost, badgeDebloat;
     private TextView tvNoVncUrl, tvVncAddr, tvMacosVnc, tvMacosSsh, tvMacosShares, tvDiskInfo, tvConsole, tvBusyStatus;
     private ScrollView consoleScroll;
 
@@ -194,7 +194,7 @@ public class MainActivity extends Activity {
         titleLine.addView(title);
 
         TextView verPill = new TextView(this);
-        verPill.setText("v2.7");
+        verPill.setText("v2.8");
         verPill.setTextColor(Color.parseColor("#7DCFFF"));
         verPill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         verPill.setTypeface(Typeface.DEFAULT_BOLD);
@@ -269,6 +269,8 @@ public class MainActivity extends Activity {
         badgeVnc = addStatusRow(statusCard, "Remote X (VNC + noVNC)");
         badgeBrowserGpu = addStatusRow(statusCard, "Brave / Electron GPU");
         badgeAllocator = addStatusRow(statusCard, "Desktop Allocator");
+        badgeShmem = addStatusRow(statusCard, "SysV SHM / X11 MIT-SHM");
+        badgeKboost = addStatusRow(statusCard, "Kernel Boost (LKM)");
         badgeDebloat = addStatusRow(statusCard, "Honor MagicOS Bloat");
 
         tvDiskInfo = makeInfoLine(statusCard, "Image: /data/adb/debian-gpu.img", COL_MUTED, 11, false);
@@ -422,10 +424,16 @@ public class MainActivity extends Activity {
                 "Lowers cluster0/1 upmigrate (95->40/45%) + asymcap_boost for faster 1C/UI bursts");
         addToggleRow(perfCard, "PERF_VM_IO", "RAM & Chroot Disk I/O Tuning",
                 "vm.swappiness=20, vfs_cache_pressure=50, loop read-ahead 512 KB");
+        addToggleRow(perfCard, "PERF_MEM_OPT", "MGLRU + HyperHold + udmabuf 2G",
+                "MGLRU min_ttl=1s (0 during VM), HyperHold 1.8 GB target, 2 GB udmabuf cap");
         addToggleRow(perfCard, "PERF_THP_OPT", "THP Defrag Fix (ARM64 64K)",
                 "defrag=defer+madvise, 2MB=madvise, 64KB CONT-PTE=always (no compaction stalls)");
         addToggleRow(perfCard, "PERF_JEMALLOC", "jemalloc 5.3 Allocator (3.7x Faster)",
                 "Tuned jemalloc for XFCE/Mesa/shells (auto-excluded from Chromium PartitionAlloc)");
+        addToggleRow(perfCard, "PERF_SHMEM_COMPAT", "SysV SHM / X11 MIT-SHM Shim",
+                "Wire-compatible /dev/ashmem libandroid-shmem for zero-copy XShm & Qt/GTK apps");
+        addToggleRow(perfCard, "PERF_KERNEL_BOOST", "Kernel Monkey-Patch (honor_boost.ko)",
+                "RAM-only LKM (opt-in): intercepts Honor FAS & KGSL max_pwrlevel only (thermal cooling & LMh untouched)");
         addToggleRow(perfCard, "PERF_XFCE_OPT", "XFCE4 No Shadows + XPresent",
                 "Disables CPU XRender frame/popup shadows & enables smooth XPresent sync");
         addToggleRow(perfCard, "PERF_CHROMIUM_VULKAN", "Native Vulkan (Brave / Electron)",
@@ -555,6 +563,15 @@ public class MainActivity extends Activity {
         addWeighted(tRow3, btnMacosLog, 0, dp(5));
         addWeighted(tRow3, btnAudioFix, dp(5), 0);
         toolsCard.addView(tRow3);
+
+        LinearLayout tRow4 = makeRow();
+        tRow4.setPadding(0, dp(8), 0, 0);
+        Button btnKProf = makeButton("Kernel Profile (3s)", Color.parseColor("#1E1B3A"),
+                Color.parseColor("#C4B5FD"), true);
+        btnKProf.setOnClickListener(v -> runRootAction("Profiling kernel kprobes/KGSL/zswapd (3s)...",
+                "/data/adb/debian-gpu.sh kernel-profile 3", false));
+        addWeighted(tRow4, btnKProf, 0, 0);
+        toolsCard.addView(tRow4);
         root.addView(toolsCard);
 
         // --- Console Output Card ---
@@ -735,6 +752,20 @@ public class MainActivity extends Activity {
         sw.setTrackTintList(trackTint);
         sw.setOnCheckedChangeListener((buttonView, isChecked) -> {
             if (updatingSwitches) return;
+            if ("PERF_KERNEL_BOOST".equals(key) && isChecked) {
+                updatingSwitches = true;
+                sw.setChecked(false);
+                updatingSwitches = false;
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Load honor_boost.ko in RAM?")
+                        .setMessage("Loads a runtime-only GKI 6.18.21 kprobe module into kernel memory to intercept Honor FAS & KGSL max_pwrlevel caps. Thermal cooling (cpufreq_cooling / qti_cpufreq_cdev / HW LMh) stays untouched, /boot is never modified, and it is never auto-loaded on reboot.")
+                        .setPositiveButton("Enable", (d, w) ->
+                                runRootAction("Loading honor_boost.ko...",
+                                        "/data/adb/debian-gpu.sh set-toggle PERF_KERNEL_BOOST 1", false))
+                        .setNegativeButton("Cancel", null)
+                        .show();
+                return;
+            }
             String val = isChecked ? "1" : "0";
             runRootAction("Toggle " + title + " -> " + (isChecked ? "ON" : "OFF"),
                     "/data/adb/debian-gpu.sh set-toggle " + key + " " + val, false);
@@ -1064,6 +1095,8 @@ public class MainActivity extends Activity {
         final long gpuMax = Math.max(1, parseLongSafe(m.get("GPU_MAX"), 1450));
         final long gpuBusy = parseLongSafe(m.get("GPU_BUSY"), 0);
         final String gpuTherm = m.getOrDefault("GPU_THERM_LVL", "?");
+        final String gpuMaxLvl = m.getOrDefault("GPU_MAX_LVL", "0");
+        final String gpuNoNap = m.getOrDefault("GPU_NO_NAP", "0");
         final String gpuWake = m.getOrDefault("GPU_WAKE_MHZ", "?");
         final String gpuIdle = m.getOrDefault("GPU_IDLE_MS", "?");
 
@@ -1084,8 +1117,17 @@ public class MainActivity extends Activity {
         final String swappiness = m.getOrDefault("SWAPPINESS", "?");
         final String loopRa = m.getOrDefault("LOOP_RA", "?");
         final String thpDefrag = m.getOrDefault("THP_DEFRAG", "?");
+        final String mglruTtl = m.getOrDefault("MGLRU_TTL", "0");
+        final String udmabufMb = m.getOrDefault("UDMABUF_MB", "512");
         final boolean vulkanOn = "1".equals(m.get("PERF_CHROMIUM_VULKAN"));
         final boolean jemallocOn = "1".equals(m.get("PERF_JEMALLOC"));
+        final boolean shmemOn = "1".equals(m.get("SHMEM_LIB"));
+        final String shmemBacking = m.getOrDefault("SHMEM_BACKING", "off");
+        final boolean kboostLoaded = "1".equals(m.get("KBOOST_LOADED"));
+        final long kbFqLifted = parseLongSafe(m.get("KBOOST_FQ_LIFTED"), 0);
+        final long kbKgslClamps = parseLongSafe(m.get("KBOOST_KGSL_CLAMPS"), 0);
+        final long kbCpuKhz = parseLongSafe(m.get("KBOOST_CPU_KHZ"), 0);
+        final long kbGpuUnclamp = parseLongSafe(m.get("KBOOST_GPU_UNCLAMP"), 0);
         final long bloatActive = parseLongSafe(m.get("HONOR_BLOAT_ACTIVE"), 0);
         final boolean bloatReboot = "1".equals(m.get("HONOR_BLOAT_REBOOT"));
 
@@ -1122,15 +1164,16 @@ public class MainActivity extends Activity {
                     c6Capped ? COL_AMBER : COL_PURPLE,
                     c6Capped ? warnFg : Color.parseColor("#A9B1D6"));
 
-            boolean gpuCapped = !"0".equals(gpuTherm);
+            boolean gpuCapped = !"0".equals(gpuTherm) || !"0".equals(gpuMaxLvl);
             updateMeter(meterGpu,
                     gpuCur + " / " + gpuMax + " MHz · " + gpuBusy + "%",
                     (float) gpuCur / gpuMax,
                     gpuCapped ? COL_AMBER : COL_GREEN,
                     gpuCapped ? warnFg : okFg);
 
-            tvGpuDetail.setText("KGSL: thermal_lvl=" + gpuTherm
-                    + " · wake=" + gpuWake + " MHz · idle=" + gpuIdle + " ms");
+            tvGpuDetail.setText("KGSL: thm=" + gpuTherm + " max=" + gpuMaxLvl
+                    + " · wake=" + gpuWake + "M · idle=" + gpuIdle + "ms"
+                    + ("1".equals(gpuNoNap) ? " · no-nap" : ""));
 
             String thermLabel = "0".equals(tStat) ? "0 (Cool)"
                     : "1".equals(tStat) ? "1 (Light)"
@@ -1142,8 +1185,8 @@ public class MainActivity extends Activity {
                     : "3".equals(honorMode) ? "PowerSave" : honorMode;
             tvPowerLine.setText("Battery " + bCap + "% (" + bTemp + "°C, " + bStat + ") · Honor: " + modeLabel
                     + " · FAS:" + ("0".equals(fasEn) ? "off" : "on") + " · dubaid:" + ("stopped".equals(dubaiSvc) ? "paused" : "on"));
-            tvMemLine.setText("RAM " + memUsed + "/" + memTot + " MB · ZRAM " + swpUsed + "/" + swpTot
-                    + " MB · swp=" + swappiness + " · RA=" + loopRa + "K · THP=" + thpDefrag);
+            tvMemLine.setText("RAM " + memUsed + "/" + memTot + "M · ZRAM " + swpUsed + "/" + swpTot
+                    + "M · swp=" + swappiness + " · TTL=" + mglruTtl + "ms · dma=" + udmabufMb + "M");
 
             tvLauncherWarn.setVisibility((launcherFront && (c0Capped || c6Capped)) ? View.VISIBLE : View.GONE);
 
@@ -1214,6 +1257,15 @@ public class MainActivity extends Activity {
                     vulkanOn ? infoFg : warnFg, vulkanOn ? infoBg : warnBg);
             setBadge(badgeAllocator, jemallocOn ? "jemalloc 5.3" : "glibc",
                     jemallocOn ? okFg : COL_MUTED, jemallocOn ? okBg : COL_SURFACE_BTN);
+            setBadge(badgeShmem, shmemOn ? (shmemBacking + " Ready") : "Disabled",
+                    shmemOn ? okFg : COL_MUTED, shmemOn ? okBg : COL_SURFACE_BTN);
+            if (kboostLoaded && (kbCpuKhz > 0 || kbGpuUnclamp > 0)) {
+                setBadge(badgeKboost, "Active (" + kbFqLifted + " CPU · " + kbKgslClamps + " GPU)", okFg, okBg);
+            } else if (kboostLoaded) {
+                setBadge(badgeKboost, "Loaded (Observe)", infoFg, infoBg);
+            } else {
+                setBadge(badgeKboost, "Off", COL_MUTED, COL_SURFACE_BTN);
+            }
 
             if (bloatActive == 0 && !bloatReboot) {
                 setBadge(badgeDebloat, "Debloated", okFg, okBg);

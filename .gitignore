@@ -11,3 +11,7 @@ android-app/build/
 __pycache__/
 *.pyc
 .DS_Store
+kernel-patch/ref/
+kernel-patch/build/
+kernel-patch/*.o
+kernel-patch/*.lds
