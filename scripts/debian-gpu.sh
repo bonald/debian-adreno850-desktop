@@ -593,17 +593,20 @@ start_pulseaudio() {
     load_conf
     [ "$PERF_PULSEAUDIO" = "1" ] || return 0
     su "$TUID" -g 3003 -c "
-        export PREFIX=$TPREFIX HOME=$THOME TMPDIR=$TPREFIX/tmp PATH=$TPREFIX/bin:/system/bin PULSE_SERVER=127.0.0.1
+        export PREFIX=$TPREFIX HOME=$THOME TMPDIR=$TPREFIX/tmp PATH=$TPREFIX/bin:/system/bin LD_LIBRARY_PATH=$TPREFIX/lib
+        unset PULSE_SERVER
         if pgrep -x pulseaudio >/dev/null 2>&1; then
-            if ! timeout 3 pactl info >/dev/null 2>&1; then
+            if ! PULSE_SERVER=127.0.0.1 timeout 3 pactl info >/dev/null 2>&1; then
                 pkill -9 -x pulseaudio 2>/dev/null || true
                 sleep 0.3
             fi
         fi
         if ! pgrep -x pulseaudio >/dev/null 2>&1; then
+            # PULSE_SERVER must be unset when starting the daemon or PulseAudio refuses to autospawn
             pulseaudio --start --load='module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1' --exit-idle-time=-1 >/dev/null 2>&1 || true
             sleep 0.5
         fi
+        export PULSE_SERVER=127.0.0.1
         if ! timeout 3 pactl list short sinks 2>/dev/null | grep -qiE 'AAudio_sink|OpenSL'; then
             timeout 3 pactl load-module module-aaudio-sink >/dev/null 2>&1 || timeout 3 pactl load-module module-sles-sink >/dev/null 2>&1 || true
             sleep 0.2
